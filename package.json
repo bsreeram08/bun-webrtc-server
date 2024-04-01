@@ -1,0 +1,25 @@
+{
+    "name": "webrtc-bun",
+    "module": "index.ts",
+    "type": "module",
+    "scripts": {
+        "serve": "bun index.ts",
+        "watch": "bun --watch index.ts"
+    },
+    "devDependencies": {
+        "@types/bun": "latest",
+        "dotenv": "^16.4.5",
+        "prettier": "^3.2.5",
+        "prettier-plugin-organize-imports": "^3.2.4"
+    },
+    "peerDependencies": {
+        "typescript": "^5.4.3"
+    },
+    "dependencies": {
+        "@elysiajs/bearer": "^1.0.2",
+        "auth0": "^4.3.1",
+        "elysia": "^1.0.10",
+        "node-jsonwebtoken": "^0.0.1",
+        "socket.io": "^4.7.5"
+    }
+}
