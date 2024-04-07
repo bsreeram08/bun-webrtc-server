@@ -17,7 +17,7 @@ async function bootstrap() {
     app.server.listen({
         port: port,
     });
-    console.log(`Listening to PORT : ${port}`);
+    console.log(`Listening to PORT : http://0.0.0.0:${port}`);
 }
 
 bootstrap().then().catch();

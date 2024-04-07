@@ -1,8 +1,8 @@
-import Elysia, { type HTTPMethod } from "elysia";
+import Elysia from 'elysia';
 
 export class Server {
-  private app: Elysia = new Elysia();
-  get server(): Elysia {
-    return this.app;
-  }
+    private app: Elysia = new Elysia();
+    get server(): Elysia {
+        return this.app;
+    }
 }

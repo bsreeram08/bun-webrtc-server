@@ -1,2 +1,2 @@
 export * from './friends';
-export * from './webrtc';
+export * from './webrtc/webrtc';

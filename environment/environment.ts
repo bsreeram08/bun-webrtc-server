@@ -10,6 +10,10 @@ const _environment = getEnvironmentVariables({
         optional: ['PORT'],
         required: [],
     },
+    REDIS: {
+        required: ['REDIS_HOST', 'REDIS_PORT'],
+        optional: [],
+    },
 });
 
 export const environment = _environment.variables;

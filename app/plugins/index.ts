@@ -1,7 +1,8 @@
 import type { Server } from '../server';
 import { registerAuth0 } from './auth0';
+import { registerRedisInit } from './redis';
 
-const plugins: Array<(app: Server) => void> = [registerAuth0];
+const plugins: Array<(app: Server) => void> = [registerAuth0, registerRedisInit];
 
 export function registerPlugins(app: Server) {
     console.log(`Registering Plugin`);
