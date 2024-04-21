@@ -24,8 +24,8 @@
         "noUnusedParameters": false,
         "noPropertyAccessFromIndexSignature": false,
         "paths": {
-            "@libs/types": ["./libs/types"],
-            "@libs/utils": ["./libs/utils"]
+            "@libs/types": ["./packages/libs/types"],
+            "@libs/utils": ["./packages/libs/utils"]
         }
     }
 }

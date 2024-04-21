@@ -1,0 +1,8 @@
+{
+    "name": "stun-server",
+    "description": "The stun server in BUN",
+    "authors": "Sreeram Balamurugan",
+    "version": "1.0.0",
+    "main": "./main.ts",
+    "dependencies": {}
+}
