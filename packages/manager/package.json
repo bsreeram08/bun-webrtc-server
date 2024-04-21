@@ -1,0 +1,8 @@
+{
+    "name": "manager",
+    "description": "The managing backend service",
+    "authors": "Sreeram Balamurugan",
+    "version": "1.0.0",
+    "main": "./main.ts",
+    "dependencies": {}
+}
