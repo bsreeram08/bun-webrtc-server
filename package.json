@@ -7,7 +7,7 @@
         "manager:w": "bun --watch ./packages/manager/main.ts",
         "stun-server:s": "bun ./packages/stun-server/main.ts",
         "stun-server:w": "bun --watch ./packages/stun-server/main.ts",
-        "stun-server:build-node": "bun build packages/stun-server/main.ts --minify --target node --outdir ./build"
+        "stun-server:build-node": "bun build packages/stun-server/main.ts --minify --target node --outdir ./build/stun-server"
     },
     "devDependencies": {
         "@types/bun": "latest",

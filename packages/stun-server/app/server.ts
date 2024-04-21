@@ -28,12 +28,18 @@ export class StunServer {
     }
 
     private registerHandler() {
-        this.server.on('message', this.handleMessage);
+        this.server.on('message', this.handleMessage.bind(this));
+    }
+
+    private sendResponse(buffer: Buffer, port: number, ip: string) {
+        console.log(`[STUN] ${buffer.toString()} [${ip}:${port}]`);
+        this.server.send(buffer, port, ip);
     }
 
     private handleMessage(message: Buffer, rinfo: dgram.RemoteInfo) {
         try {
             const stunMessage = this.parseMessage(message);
+            console.log(stunMessage);
             switch (stunMessage.header.type) {
                 case EMessageType.BINDING_REQUEST:
                     this.handleBindingRequest(stunMessage, rinfo);
@@ -99,6 +105,7 @@ export class StunServer {
         // Validate the parsed STUN message against the VStunMessage schema
         const validationResult = v.safeParse(VStunMessage, stunMessage);
         if (!validationResult.success) {
+            console.log(JSON.stringify({ validationResult }));
             throw StunError.fromCode(EStunErrorCodes.INVALID_STUN_MESSAGE_VALIDATION);
         }
 
@@ -185,7 +192,7 @@ export class StunServer {
         // Send the Binding Response
         const destinationAddress = responseAddress ? this.decodeAddress(responseAddress.value).address : rinfo.address;
         const destinationPort = responseAddress ? this.decodeAddress(responseAddress.value).port : rinfo.port;
-        this.server.send(responseBuffer, destinationPort, destinationAddress);
+        this.sendResponse(responseBuffer, destinationPort, destinationAddress);
     }
 
     private handleSharedSecretRequest(message: TStunMessage, rinfo: dgram.RemoteInfo) {
@@ -224,7 +231,7 @@ export class StunServer {
             const responseBuffer = this.serializeMessage(response);
 
             // Send the Shared Secret Response
-            this.server.send(responseBuffer, rinfo.port, rinfo.address);
+            this.sendResponse(responseBuffer, rinfo.port, rinfo.address);
         } catch (error) {
             console.error('Error processing Shared Secret Request:', error);
             // Send an error response if needed
@@ -253,7 +260,7 @@ export class StunServer {
         const responseBuffer = this.serializeMessage(errorMessage);
 
         // Send the error response back to the client
-        this.server.send(responseBuffer, rinfo.port, rinfo.address);
+        this.sendResponse(responseBuffer, rinfo.port, rinfo.address);
     }
 
     private serializeMessage(message: TStunMessage): Buffer {
