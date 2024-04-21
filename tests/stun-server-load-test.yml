@@ -1,0 +1,33 @@
+config:
+  target: "udp://localhost:5995"
+  phases:
+    - duration: 60
+      arrivalRate: 10
+      name: "Steady load"
+    - duration: 120
+      arrivalRate: 20
+      rampTo: 50
+      name: "Ramp up load"
+
+scenarios:
+  - name: "Binding Request"
+    flow:
+      - send:
+          data: "{{ bindingRequest }}"
+      - think: 1
+      - recv:
+          contains: "{{ bindingResponse }}"
+
+  - name: "Shared Secret Request"
+    flow:
+      - send:
+          data: "{{ sharedSecretRequest }}"
+      - think: 1
+      - recv:
+          contains: "{{ sharedSecretResponse }}"
+
+payload:
+  bindingRequest: "000100002112a4426f58746a78514c7366594a314178514c75"
+  bindingResponse: "0101"
+  sharedSecretRequest: "0002000021123f426f5874675677d41a683d56304961675856"
+  sharedSecretResponse: "0102"
