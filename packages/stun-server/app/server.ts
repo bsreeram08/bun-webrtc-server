@@ -3,6 +3,7 @@ import * as dgram from 'dgram';
 import { Cluster, Redis } from 'ioredis';
 import * as nanoid from 'nanoid';
 import * as v from 'valibot';
+import { environment } from '../environment/environment';
 import {
     EAttributeType,
     EMessageType,
@@ -119,11 +120,11 @@ export class StunServer {
             const changePort = (changeRequestValue & 0x02) !== 0;
 
             if (changeIP) {
-                sourceAddress = ''; // Replace with the desired alternate IP address
+                sourceAddress = environment.STUN.ALTERNATE_IP ?? '';
             }
 
             if (changePort) {
-                sourcePort = 0; // Replace with the desired alternate port
+                sourcePort = parseInt(environment.STUN.ALTERNATE_PORT ?? '0');
             }
         }
 
@@ -148,7 +149,7 @@ export class StunServer {
                 {
                     type: EAttributeType.ChangedAddress,
                     length: 8,
-                    value: this.encodeAddress('', 0), // Replace with the desired alternate IP and port
+                    value: this.encodeAddress(environment.STUN.ALTERNATE_IP ?? '', parseInt(environment.STUN.ALTERNATE_PORT ?? '0')),
                 },
             ],
         };
