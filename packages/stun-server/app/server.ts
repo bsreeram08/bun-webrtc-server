@@ -1,6 +1,6 @@
 import * as crypto from 'crypto';
 import * as dgram from 'dgram';
-import { Cluster, Redis } from 'ioredis';
+import type { Cluster, Redis } from 'ioredis';
 import * as nanoid from 'nanoid';
 import * as v from 'valibot';
 import { environment } from '../environment/environment';
@@ -32,7 +32,7 @@ export class StunServer {
     }
 
     private sendResponse(buffer: Buffer, port: number, ip: string) {
-        console.log(`[STUN] ${buffer.toString()} [${ip}:${port}]`);
+        console.log(`[STUN] [SEND] ${buffer.toString()} [${ip}:${port}]`);
         this.server.send(buffer, port, ip);
     }
 
@@ -353,7 +353,7 @@ export class StunServer {
     }
 
     start(port: number) {
-        this.server.bind(port, () => {
+        this.server.bind(port, '0.0.0.0', () => {
             console.log(`STUN server listening on port ${port}`);
         });
     }

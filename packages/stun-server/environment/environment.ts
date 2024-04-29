@@ -10,6 +10,10 @@ const _environment = getEnvironmentVariables({
         required: [],
         optional: ['ALTERNATE_IP', 'ALTERNATE_PORT'],
     },
+    APP: {
+        required: [],
+        optional: ['APP_PORT'],
+    },
 });
 
 export const environment = _environment.variables;
