@@ -4,5 +4,9 @@
     "authors": "Sreeram Balamurugan",
     "version": "1.0.0",
     "main": "./main.ts",
-    "dependencies": {}
+    "dependencies": {},
+    "scripts": {
+        "start": "node main.js"
+    },
+    "type": "module"
 }

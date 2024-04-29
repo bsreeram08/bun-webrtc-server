@@ -1,0 +1,10 @@
+FROM node:20-bullseye
+WORKDIR /usr/src/app
+RUN chown node:node /usr/src/app
+USER node
+ARG PROJECT
+COPY --chown=node:node package.json ./
+RUN npm install --omit=dev
+EXPOSE 5995
+COPY --chown=node:node ./ ./
+CMD ["bash", "-c", "npm run start"]
