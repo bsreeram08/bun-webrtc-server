@@ -10,17 +10,24 @@ import {
     EStunErrorCodes,
     StunError,
     VStunMessage,
+    type TStunAddress,
     type TStunAttribute,
+    type TStunChangeRequest,
+    type TStunErrorCode,
     type TStunHeader,
     type TStunMessage,
 } from '../types';
+
 import { StunRedisClient } from './redis';
 
 export class StunServer {
     private server: dgram.Socket;
     private redis: StunRedisClient;
 
-    constructor(socketType: 'udp4' | 'udp6', redisConnection: Redis | Cluster) {
+    constructor(
+        private socketType: 'udp4' | 'udp6',
+        redisConnection: Redis | Cluster,
+    ) {
         this.server = dgram.createSocket(socketType);
         this.redis = new StunRedisClient(redisConnection);
 
@@ -32,17 +39,17 @@ export class StunServer {
     }
 
     private sendResponse(buffer: Buffer, port: number, ip: string) {
-        console.log(`[STUN] [SEND] ${buffer.toString()} [${ip}:${port}]`);
-        this.server.send(buffer, port, ip);
+        console.log(`[${this.socketType}] [STUN] [SEND] [${ip}:${port}]`);
+        this.server.send(Uint8Array.from(buffer), port, ip);
     }
 
-    private handleMessage(message: Buffer, rinfo: dgram.RemoteInfo) {
+    private async handleMessage(message: Buffer, rinfo: dgram.RemoteInfo) {
         try {
             const stunMessage = this.parseMessage(message);
-            console.log(stunMessage);
+            console.log(`[${this.socketType}] [STUN] [RECV] ${stunMessage.header.type}`);
             switch (stunMessage.header.type) {
                 case EMessageType.BINDING_REQUEST:
-                    this.handleBindingRequest(stunMessage, rinfo);
+                    await this.handleBindingRequest(stunMessage, rinfo);
                     break;
                 case EMessageType.SHARED_SECRET_REQUEST:
                     this.handleSharedSecretRequest(stunMessage, rinfo);
@@ -54,6 +61,8 @@ export class StunServer {
             console.error('Error processing STUN message:', error);
             if (StunError.isStunError(error)) {
                 this.sendErrorResponse(rinfo, error.errorCodes.join(','), error.message);
+            } else {
+                console.error('Unexpected error:', error);
             }
         }
     }
@@ -65,7 +74,7 @@ export class StunServer {
         const header: TStunHeader = {
             type: message.readUInt16BE(0),
             length: message.readUInt16BE(2),
-            transactionId: message.slice(4, 20).toString('hex'),
+            transactionId: message.subarray(4, 20).toString('hex'),
         };
         if (header.length !== message.length - 20) {
             throw StunError.fromCode(EStunErrorCodes.INVALID_STUN_MESSAGE_LENGTH);
@@ -77,23 +86,19 @@ export class StunServer {
             if (offset + 4 > message.length) {
                 throw new Error('Invalid STUN message: incomplete attribute header');
             }
+            const type = message.readUInt16BE(offset);
+            const length = message.readUInt16BE(offset + 2);
+            const value = message.subarray(offset + 4, offset + 4 + length);
 
-            const attributeType = message.readUInt16BE(offset);
-            const attributeLength = message.readUInt16BE(offset + 2);
-
-            if (offset + 4 + attributeLength > message.length) {
+            if (offset + 4 + length > message.length) {
                 throw new Error('Invalid STUN message: attribute length exceeds message boundary');
             }
 
-            const attributeValue = message.slice(offset + 4, offset + 4 + attributeLength);
+            const attributeValue = message.subarray(offset + 4, offset + 4 + length);
 
-            attributes.push({
-                type: attributeType,
-                length: attributeLength,
-                value: attributeValue.toString('hex'),
-            });
+            attributes.push(this.parseAttribute(type, length, value));
 
-            offset += 4 + attributeLength;
+            offset += 4 + length;
             offset += (4 - (offset % 4)) % 4; // Padding to align to 4-byte boundary
         }
 
@@ -105,37 +110,70 @@ export class StunServer {
         // Validate the parsed STUN message against the VStunMessage schema
         const validationResult = v.safeParse(VStunMessage, stunMessage);
         if (!validationResult.success) {
-            console.log(JSON.stringify({ validationResult }));
+            console.log(`[${this.socketType}] [STUN] [VALIDATION] ${JSON.stringify({ validationResult })}`);
             throw StunError.fromCode(EStunErrorCodes.INVALID_STUN_MESSAGE_VALIDATION);
         }
 
         return stunMessage;
     }
 
-    private handleBindingRequest(message: TStunMessage, rinfo: dgram.RemoteInfo) {
-        const transactionId = message.header.transactionId;
-        const changeRequest = message.attributes.find((attr) => attr.type === EAttributeType.ChangeRequest);
-        const responseAddress = message.attributes.find((attr) => attr.type === EAttributeType.ResponseAddress);
+    private parseAttribute(type: number, length: number, value: Buffer): TStunAttribute {
+        switch (type) {
+            case EAttributeType.ChangeRequest:
+                return this.parseChangeRequest(type, length, value);
+            // Add cases for other attribute types
+            default:
+                return {
+                    type,
+                    length,
+                    value: value.toString('hex'),
+                };
+        }
+    }
 
-        // Determine the source address and port for the response
+    private parseChangeRequest(type: number, length: number, value: Buffer): TStunChangeRequest {
+        return {
+            type,
+            length: <4>length,
+            value: {
+                changeIp: (value.readUInt32BE(0) & 0x04) !== 0,
+                changePort: (value.readUInt32BE(0) & 0x02) !== 0,
+            },
+        };
+    }
+
+    private async handleBindingRequest(message: TStunMessage, rinfo: dgram.RemoteInfo) {
+        const transactionId = message.header.transactionId;
+        let changeRequest: TStunChangeRequest | undefined;
+        let username: string | undefined;
+        let hasMessageIntegrity = false;
+
+        for (const attribute of message.attributes) {
+            switch (attribute.type) {
+                case EAttributeType.ChangeRequest:
+                    changeRequest = attribute as TStunChangeRequest;
+                    break;
+                case EAttributeType.Username:
+                    username = <string>attribute.value;
+                    break;
+                case EAttributeType.MessageIntegrity:
+                    hasMessageIntegrity = true;
+                    break;
+            }
+        }
+
         let sourceAddress = rinfo.address;
         let sourcePort = rinfo.port;
 
         if (changeRequest) {
-            const changeRequestValue = Buffer.from(changeRequest.value, 'hex').readUInt32BE(0);
-            const changeIP = (changeRequestValue & 0x04) !== 0;
-            const changePort = (changeRequestValue & 0x02) !== 0;
-
-            if (changeIP) {
-                sourceAddress = environment.STUN.ALTERNATE_IP ?? '';
+            if (changeRequest.value.changeIp) {
+                sourceAddress = environment.STUN.ALTERNATE_IP ?? sourceAddress;
             }
-
-            if (changePort) {
-                sourcePort = parseInt(environment.STUN.ALTERNATE_PORT ?? '0');
+            if (changeRequest.value.changePort) {
+                sourcePort = parseInt(environment.STUN.ALTERNATE_PORT ?? sourcePort.toString());
             }
         }
 
-        // Create the Binding Response message
         const response: TStunMessage = {
             header: {
                 type: EMessageType.BINDING_RESPONSE,
@@ -143,6 +181,11 @@ export class StunServer {
                 transactionId: transactionId,
             },
             attributes: [
+                {
+                    type: EAttributeType.XorMappedAddress,
+                    length: 8,
+                    value: this.encodeXorMappedAddress(rinfo.address, rinfo.port, transactionId),
+                },
                 {
                     type: EAttributeType.MappedAddress,
                     length: 8,
@@ -156,57 +199,39 @@ export class StunServer {
                 {
                     type: EAttributeType.ChangedAddress,
                     length: 8,
-                    value: this.encodeAddress(environment.STUN.ALTERNATE_IP ?? '', parseInt(environment.STUN.ALTERNATE_PORT ?? '0')),
+                    value: this.encodeAddress(environment.STUN.ALTERNATE_IP ?? '0.0.0.0', parseInt(environment.STUN.ALTERNATE_PORT ?? '3479')),
+                },
+                {
+                    type: EAttributeType.Software,
+                    length: 21,
+                    value: Buffer.from('STUN server by Sreeram').toString('hex'),
                 },
             ],
         };
 
-        // Add the XOR-MAPPED-ADDRESS attribute if required
-        if (message.attributes.some((attr) => attr.type === EAttributeType.Software && attr.value.includes('RFC 5389'))) {
-            const xorMappedAddress = this.encodeXorMappedAddress(rinfo.address, rinfo.port, transactionId);
-            response.attributes.push({
-                type: EAttributeType.XorMappedAddress,
-                length: xorMappedAddress.length,
-                value: xorMappedAddress,
-            });
-        }
-
-        // Add the MESSAGE-INTEGRITY attribute if message integrity is enabled
-        if (message.attributes.some((attr) => attr.type === EAttributeType.Username)) {
-            const username = message.attributes.find((attr) => attr.type === EAttributeType.Username)?.value;
-            const sharedSecret = this.redis.getSharedSecret(`${username}`);
-
+        if (hasMessageIntegrity && username) {
+            const sharedSecret = await this.redis.getSharedSecret(username);
             if (sharedSecret) {
-                const messageIntegrity = this.calculateMessageIntegrity(response, `${sharedSecret}`);
+                const messageIntegrity = this.calculateMessageIntegrity(response, sharedSecret);
                 response.attributes.push({
                     type: EAttributeType.MessageIntegrity,
-                    length: messageIntegrity.length,
+                    length: 20,
                     value: messageIntegrity,
                 });
             }
         }
 
-        // Serialize the response message
         const responseBuffer = this.serializeMessage(response);
-
-        // Send the Binding Response
-        const destinationAddress = responseAddress ? this.decodeAddress(responseAddress.value).address : rinfo.address;
-        const destinationPort = responseAddress ? this.decodeAddress(responseAddress.value).port : rinfo.port;
-        this.sendResponse(responseBuffer, destinationPort, destinationAddress);
+        this.sendResponse(responseBuffer, rinfo.port, rinfo.address);
     }
 
-    private handleSharedSecretRequest(message: TStunMessage, rinfo: dgram.RemoteInfo) {
+    private async handleSharedSecretRequest(message: TStunMessage, rinfo: dgram.RemoteInfo) {
         try {
-            // Generate a new shared secret
             const sharedSecret = nanoid.nanoid(32);
-
-            // Create a unique username for the shared secret
             const username = `user-${nanoid.nanoid(10)}`;
 
-            // Store the shared secret associated with the username
-            this.redis.setSharedSecret(username, sharedSecret);
+            await this.redis.setSharedSecret(username, sharedSecret);
 
-            // Create the Shared Secret Response message
             const response: TStunMessage = {
                 header: {
                     type: EMessageType.SHARED_SECRET_RESPONSE,
@@ -217,90 +242,140 @@ export class StunServer {
                     {
                         type: EAttributeType.Username,
                         length: username.length,
-                        value: username,
+                        value: Buffer.from(username).toString('hex'),
                     },
                     {
                         type: EAttributeType.Password,
                         length: sharedSecret.length,
-                        value: sharedSecret,
+                        value: Buffer.from(sharedSecret).toString('hex'),
                     },
                 ],
             };
 
-            // Serialize the response message
             const responseBuffer = this.serializeMessage(response);
-
-            // Send the Shared Secret Response
             this.sendResponse(responseBuffer, rinfo.port, rinfo.address);
         } catch (error) {
             console.error('Error processing Shared Secret Request:', error);
-            // Send an error response if needed
-            this.sendErrorResponse(rinfo, EStunErrorCodes.STUN_SERVER_ERROR, 'Server Error');
+            await this.sendErrorResponse(rinfo, EStunErrorCodes.STUN_SERVER_ERROR, 'Server Error');
         }
     }
 
     private sendErrorResponse(rinfo: dgram.RemoteInfo, code: string, reason: string) {
-        // Construct an error response message
+        const errorCode = parseInt(code.split('_').pop() ?? '500', 10);
+        const errorClass = Math.floor(errorCode / 100);
+        const errorNumber = errorCode % 100;
+        const errorBuffer = new Uint8Array(Buffer.from([0, 0, errorClass, errorNumber]));
+        const reasonBuffer = new Uint8Array(Buffer.from(reason));
         const errorMessage: TStunMessage = {
             header: {
                 type: EMessageType.BINDING_ERROR_RESPONSE,
                 length: 0,
-                transactionId: '',
+                transactionId: crypto.randomBytes(16).toString('hex'),
             },
             attributes: [
                 {
                     type: EAttributeType.ErrorCode,
-                    length: reason.length,
-                    value: `${code}: ${reason}`,
+                    length: 4 + reason.length,
+                    value: Buffer.from(new Uint8Array([...errorBuffer, ...reasonBuffer])).toString('hex'),
                 },
             ],
         };
 
-        // Serialize the error response message
         const responseBuffer = this.serializeMessage(errorMessage);
-
-        // Send the error response back to the client
         this.sendResponse(responseBuffer, rinfo.port, rinfo.address);
     }
 
     private serializeMessage(message: TStunMessage): Buffer {
-        // Calculate the total length of the message
-        const totalLength =
-            20 +
-            message.attributes.reduce((length, attribute) => {
-                return length + 4 + attribute.value.length + ((4 - (attribute.value.length % 4)) % 4);
-            }, 0);
+        let attributesLength = 0;
+        const attributeBuffers: Buffer[] = [];
 
-        // Create a buffer to hold the serialized message
-        const buffer = Buffer.alloc(totalLength);
+        for (const attr of message.attributes) {
+            let attrBuff: Buffer;
 
-        // Write the message header
-        buffer.writeUInt16BE(message.header.type, 0);
-        buffer.writeUInt16BE(totalLength - 20, 2);
-        Buffer.from(message.header.transactionId, 'hex').copy(buffer, 4);
+            if (typeof attr.value === 'string') {
+                attrBuff = Buffer.from(attr.value, 'hex');
+            } else if (typeof attr.value === 'number') {
+                attrBuff = Buffer.alloc(4);
+                attrBuff.writeUInt32BE(attr.value);
+            } else if (Array.isArray(attr.value)) {
+                attrBuff = Buffer.from(attr.value);
+            } else if (typeof attr.value === 'object') {
+                // Handle specific attribute types
+                switch (attr.type) {
+                    case EAttributeType.MappedAddress:
+                    case EAttributeType.XorMappedAddress:
+                        attrBuff = this.encodeAddressAttribute(<TStunAddress>attr.value);
+                        break;
+                    case EAttributeType.ErrorCode:
+                        attrBuff = this.encodeErrorCodeAttribute(<TStunErrorCode['value']>attr.value);
+                        break;
+                    case EAttributeType.ChangeRequest:
+                        attrBuff = this.encodeChangeRequestAttribute(<TStunChangeRequest['value']>attr.value);
+                        break;
+                    default:
+                        throw new Error(`Unsupported attribute type: ${attr.type}`);
+                }
+            } else {
+                throw new Error(`Unsupported attribute value type for attribute: ${attr.type}`);
+            }
 
-        // Write the message attributes
-        let offset = 20;
-        for (const attribute of message.attributes) {
-            buffer.writeUInt16BE(attribute.type, offset);
-            buffer.writeUInt16BE(attribute.value.length, offset + 2);
-            Buffer.from(attribute.value, 'hex').copy(buffer, offset + 4);
+            const paddedLength = Math.ceil(attrBuff.length / 4) * 4;
+            const paddedBuff = Buffer.alloc(paddedLength);
+            attrBuff.copy(paddedBuff);
 
-            offset += 4 + attribute.value.length;
-            offset += (4 - (offset % 4)) % 4; // Padding to align to 4-byte boundary
+            const attrHeader = Buffer.alloc(4);
+            attrHeader.writeUInt16BE(attr.type, 0);
+            attrHeader.writeUInt16BE(attrBuff.length, 2);
+
+            attributeBuffers.push(attrHeader, paddedBuff);
+            attributesLength += 4 + paddedLength;
         }
 
-        return buffer;
+        const header = Buffer.alloc(20);
+        header.writeUInt16BE(message.header.type, 0);
+        header.writeUInt16BE(attributesLength, 2);
+        Buffer.from(message.header.transactionId, 'hex').copy(header, 4);
+
+        return Buffer.concat([header, ...attributeBuffers]);
+    }
+
+    private encodeAddressAttribute(value: TStunAddress): Buffer {
+        const buff = Buffer.alloc(8);
+        buff.writeUInt8(0, 0); // Reserved
+        buff.writeUInt8(value.family, 1);
+        buff.writeUInt16BE(value.port, 2);
+        value.address.split('.').forEach((octet, index) => {
+            buff.writeUInt8(parseInt(octet, 10), 4 + index);
+        });
+        return buff;
+    }
+
+    private encodeErrorCodeAttribute(value: TStunErrorCode['value']): Buffer {
+        const reasonBuff = Buffer.from(value.reason);
+        const buff = Buffer.alloc(4 + reasonBuff.length);
+        buff.writeUInt16BE(0, 0); // Reserved
+        buff.writeUInt8(value.errorClass, 2);
+        buff.writeUInt8(value.number, 3);
+        reasonBuff.copy(new Uint8Array(buff), 4);
+        return buff;
+    }
+
+    private encodeChangeRequestAttribute(value: TStunChangeRequest['value']): Buffer {
+        const buff = Buffer.alloc(4);
+        let flags = 0;
+        if (value.changeIp) flags |= 0x04;
+        if (value.changePort) flags |= 0x02;
+        buff.writeUInt32BE(flags);
+        return buff;
     }
 
     private encodeAddress(address: string, port: number): string {
-        // Encode the IP address and port into a STUN address attribute value
         const buff = Buffer.alloc(8);
         const parts = address.split('.');
 
-        buff.writeUInt16BE(0x0001, 0); // Address family (IPv4)
+        buff.writeUInt8(0, 0); // Reserved
+        buff.writeUInt8(1, 1); // Family (IPv4)
         buff.writeUInt16BE(port, 2);
-
         for (let i = 0; i < 4; i++) {
             buff.writeUInt8(parseInt(parts[i], 10), 4 + i);
         }
@@ -332,29 +407,44 @@ export class StunServer {
         const buff = Buffer.alloc(8);
         const parts = address.split('.');
 
-        buff.writeUInt16BE(0x0001, 0); // Address family (IPv4)
-        buff.writeUInt16BE(port ^ 0x2112, 2); // XOR the port with 0x2112
+        buff.writeUInt8(0, 0); // Reserved
+        buff.writeUInt8(1, 1); // Family (IPv4)
+        buff.writeUInt16BE(port ^ 0x2112, 2); // XOR the port with the first 16 bits of the magic cookie
 
         const magicCookie = Buffer.from('2112A442', 'hex');
-        const transactionIdBuffer = Buffer.from(transactionId, 'hex');
-
         for (let i = 0; i < 4; i++) {
-            buff.writeUInt8(parseInt(parts[i], 10) ^ magicCookie.readUInt8(i), 4 + i);
+            buff.writeUInt8(parseInt(parts[i], 10) ^ magicCookie[i], 4 + i);
         }
 
         return buff.toString('hex');
     }
 
     private calculateMessageIntegrity(message: TStunMessage, key: string): string {
-        const serializedMessage = this.serializeMessage(message);
+        // Create a copy of the message to modify for integrity calculation
+        const integrityCopy = JSON.parse(JSON.stringify(message));
+
+        // Remove any existing MESSAGE-INTEGRITY attribute
+        integrityCopy.attributes = integrityCopy.attributes.filter((attr: TStunAttribute) => attr.type !== EAttributeType.MessageIntegrity);
+
+        // Set the message length to include the MESSAGE-INTEGRITY attribute
+        integrityCopy.header.length = this.calculateMessageLength(integrityCopy) + 24;
+
+        // Serialize the modified message
+        const serializedMessage = this.serializeMessage(integrityCopy);
+
+        // Calculate the HMAC-SHA1
         const hmac = crypto.createHmac('sha1', key);
-        hmac.update(serializedMessage);
+        hmac.update(new Uint8Array(serializedMessage));
         return hmac.digest('hex');
+    }
+
+    private calculateMessageLength(message: TStunMessage): number {
+        return message.attributes.reduce((length, attr) => length + 4 + attr.length, 0);
     }
 
     start(port: number) {
         this.server.bind(port, '0.0.0.0', () => {
-            console.log(`STUN server listening on port ${port}`);
+            console.log(`[${this.socketType}] STUN server listening on port ${port}`);
         });
     }
 }
