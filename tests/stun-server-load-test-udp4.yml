@@ -1,0 +1,20 @@
+config:
+  target: "udp://[::1]:3478"
+  phases:
+    - duration: 60
+      arrivalRate: 10
+      rampTo: 50
+      name: "Ramp up load"
+    - duration: 300
+      arrivalRate: 50
+      name: "Sustained load"
+  processor: "./stun-processor.mjs"
+  variables:
+    socketType: "udp4"
+
+scenarios:
+  - name: "STUN Binding Request (UDP4)"
+    flow:
+      - function: "sendStunBindingRequest"
+      - think: 1
+      - function: "validateStunResponse"

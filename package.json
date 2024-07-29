@@ -13,7 +13,8 @@
         "@types/bun": "latest",
         "dotenv": "^16.4.5",
         "prettier": "^3.2.5",
-        "prettier-plugin-organize-imports": "^3.2.4"
+        "prettier-plugin-organize-imports": "^3.2.4",
+        "stun": "^2.1.0"
     },
     "peerDependencies": {
         "typescript": "^5.4.3"

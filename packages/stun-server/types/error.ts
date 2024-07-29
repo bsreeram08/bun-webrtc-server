@@ -6,6 +6,11 @@ export const EStunErrorCodes = {
     INVALID_STUN_MESSAGE_LENGTH: 'STUN_00003',
     INVALID_STUN_MESSAGE_VALIDATION: 'STUN_00004',
     STUN_SERVER_ERROR: 'STUN_00005',
+    BAD_REQUEST: 'STUN_00006',
+    UNAUTHORIZED: 'STUN_00007',
+    UNKNOWN_ATTRIBUTE: 'STUN_00008',
+    STALE_NONCE: 'STUN_00009',
+    SERVER_ERROR: 'STUN_00010',
 } as const;
 
 const stunErrorMessage = {
@@ -14,6 +19,11 @@ const stunErrorMessage = {
     STUN_00003: 'Invalid STUN message: invalid message length',
     STUN_00004: 'Invalid STUN message: validation failed',
     STUN_00005: 'STUN: Server Error',
+    STUN_00006: 'STUN: Bad Request',
+    STUN_00007: 'STUN: Unauthorized',
+    STUN_00008: 'STUN: Unknown Attribute',
+    STUN_00009: 'STUN: Stale Nonce',
+    STUN_00010: 'STUN: Server Error',
 } as const satisfies Record<TStunErrorCodes, string>;
 
 export type TStunErrorCodes = ValueOf<typeof EStunErrorCodes>;
