@@ -10,6 +10,7 @@ import {
     EStunErrorCodes,
     StunError,
     VStunMessage,
+    messageTypeNameMap,
     type TStunAddress,
     type TStunAttribute,
     type TStunChangeRequest,
@@ -21,11 +22,11 @@ import {
 import { StunRedisClient } from './redis';
 
 export class StunServer {
-    private server: dgram.Socket;
-    private redis: StunRedisClient;
+    protected server: dgram.Socket;
+    protected redis: StunRedisClient;
 
     constructor(
-        private socketType: 'udp4' | 'udp6',
+        protected socketType: 'udp4' | 'udp6',
         redisConnection: Redis | Cluster,
     ) {
         this.server = dgram.createSocket(socketType);
@@ -34,19 +35,19 @@ export class StunServer {
         this.registerHandler();
     }
 
-    private registerHandler() {
+    protected registerHandler() {
         this.server.on('message', this.handleMessage.bind(this));
     }
 
-    private sendResponse(buffer: Buffer, port: number, ip: string) {
+    protected sendResponse(buffer: Buffer, port: number, ip: string) {
         console.log(`[${this.socketType}] [STUN] [SEND] [${ip}:${port}]`);
         this.server.send(Uint8Array.from(buffer), port, ip);
     }
 
-    private async handleMessage(message: Buffer, rinfo: dgram.RemoteInfo) {
+    protected async handleMessage(message: Buffer, rinfo: dgram.RemoteInfo) {
         try {
             const stunMessage = this.parseMessage(message);
-            console.log(`[${this.socketType}] [STUN] [RECV] ${stunMessage.header.type}`);
+            console.log(`[${this.socketType}] [STUN] [RECV] ${messageTypeNameMap[stunMessage.header.type]}`);
             switch (stunMessage.header.type) {
                 case EMessageType.BINDING_REQUEST:
                     await this.handleBindingRequest(stunMessage, rinfo);
@@ -67,7 +68,7 @@ export class StunServer {
         }
     }
 
-    private parseMessage(message: Buffer): TStunMessage {
+    protected parseMessage(message: Buffer): TStunMessage {
         if (message.length < 20) {
             throw StunError.fromCode(EStunErrorCodes.INVALID_STUN_MESSAGE_SHORT);
         }
@@ -260,7 +261,7 @@ export class StunServer {
         }
     }
 
-    private sendErrorResponse(rinfo: dgram.RemoteInfo, code: string, reason: string) {
+    protected sendErrorResponse(rinfo: dgram.RemoteInfo, code: string, reason: string) {
         const errorCode = parseInt(code.split('_').pop() ?? '500', 10);
         const errorClass = Math.floor(errorCode / 100);
         const errorNumber = errorCode % 100;
@@ -285,7 +286,7 @@ export class StunServer {
         this.sendResponse(responseBuffer, rinfo.port, rinfo.address);
     }
 
-    private serializeMessage(message: TStunMessage): Buffer {
+    protected serializeMessage(message: TStunMessage): Buffer {
         let attributesLength = 0;
         const attributeBuffers: Buffer[] = [];
 
@@ -321,7 +322,7 @@ export class StunServer {
 
             const paddedLength = Math.ceil(attrBuff.length / 4) * 4;
             const paddedBuff = Buffer.alloc(paddedLength);
-            attrBuff.copy(paddedBuff);
+            attrBuff.copy(<never>paddedBuff);
 
             const attrHeader = Buffer.alloc(4);
             attrHeader.writeUInt16BE(attr.type, 0);
@@ -334,12 +335,12 @@ export class StunServer {
         const header = Buffer.alloc(20);
         header.writeUInt16BE(message.header.type, 0);
         header.writeUInt16BE(attributesLength, 2);
-        Buffer.from(message.header.transactionId, 'hex').copy(header, 4);
+        Buffer.from(message.header.transactionId, 'hex').copy(<never>header, 4);
 
-        return Buffer.concat([header, ...attributeBuffers]);
+        return Buffer.concat([<never>header, ...(<never[]>attributeBuffers)]);
     }
 
-    private encodeAddressAttribute(value: TStunAddress): Buffer {
+    protected encodeAddressAttribute(value: TStunAddress): Buffer {
         const buff = Buffer.alloc(8);
         buff.writeUInt8(0, 0); // Reserved
         buff.writeUInt8(value.family, 1);
@@ -350,7 +351,7 @@ export class StunServer {
         return buff;
     }
 
-    private encodeErrorCodeAttribute(value: TStunErrorCode['value']): Buffer {
+    protected encodeErrorCodeAttribute(value: TStunErrorCode['value']): Buffer {
         const reasonBuff = Buffer.from(value.reason);
         const buff = Buffer.alloc(4 + reasonBuff.length);
         buff.writeUInt16BE(0, 0); // Reserved
@@ -360,7 +361,7 @@ export class StunServer {
         return buff;
     }
 
-    private encodeChangeRequestAttribute(value: TStunChangeRequest['value']): Buffer {
+    protected encodeChangeRequestAttribute(value: TStunChangeRequest['value']): Buffer {
         const buff = Buffer.alloc(4);
         let flags = 0;
         if (value.changeIp) flags |= 0x04;
@@ -369,7 +370,7 @@ export class StunServer {
         return buff;
     }
 
-    private encodeAddress(address: string, port: number): string {
+    protected encodeAddress(address: string, port: number): string {
         const buff = Buffer.alloc(8);
         const parts = address.split('.');
 
@@ -383,7 +384,7 @@ export class StunServer {
         return buff.toString('hex');
     }
 
-    private decodeAddress(value: string): { address: string; port: number } {
+    protected decodeAddress(value: string): { address: string; port: number } {
         // Decode the IP address and port from a STUN address attribute value
         const buff = Buffer.from(value, 'hex');
 
@@ -403,7 +404,7 @@ export class StunServer {
         return { address, port };
     }
 
-    private encodeXorMappedAddress(address: string, port: number, transactionId: string): string {
+    protected encodeXorMappedAddress(address: string, port: number, transactionId: string): string {
         const buff = Buffer.alloc(8);
         const parts = address.split('.');
 
@@ -419,7 +420,7 @@ export class StunServer {
         return buff.toString('hex');
     }
 
-    private calculateMessageIntegrity(message: TStunMessage, key: string): string {
+    protected calculateMessageIntegrity(message: TStunMessage, key: string): string {
         // Create a copy of the message to modify for integrity calculation
         const integrityCopy = JSON.parse(JSON.stringify(message));
 
@@ -438,7 +439,7 @@ export class StunServer {
         return hmac.digest('hex');
     }
 
-    private calculateMessageLength(message: TStunMessage): number {
+    protected calculateMessageLength(message: TStunMessage): number {
         return message.attributes.reduce((length, attr) => length + 4 + attr.length, 0);
     }
 
