@@ -11,6 +11,7 @@ export const EStunErrorCodes = {
     UNKNOWN_ATTRIBUTE: 'STUN_00008',
     STALE_NONCE: 'STUN_00009',
     SERVER_ERROR: 'STUN_00010',
+    ALLOCATION_MISMATCH: 'STUN_00011',
 } as const;
 
 const stunErrorMessage = {
@@ -24,6 +25,7 @@ const stunErrorMessage = {
     STUN_00008: 'STUN: Unknown Attribute',
     STUN_00009: 'STUN: Stale Nonce',
     STUN_00010: 'STUN: Server Error',
+    STUN_00011: 'STUN: Allocation Mismatch',
 } as const satisfies Record<TStunErrorCodes, string>;
 
 export type TStunErrorCodes = ValueOf<typeof EStunErrorCodes>;

@@ -12,7 +12,7 @@ const _environment = getEnvironmentVariables({
     },
     APP: {
         required: [],
-        optional: ['APP_PORT_UDP4', 'APP_PORT_UDP6'],
+        optional: ['APP_PORT_UDP4', 'APP_PORT_UDP6', 'APP_PORT_UDP4_TURN', 'APP_PORT_UDP6_TURN'],
     },
 });
 
