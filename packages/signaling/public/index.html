@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Private call</title><link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body><main>
+  <header><p class="eyebrow">YOUR SERVER · YOUR CONVERSATION</p><h1>Private call</h1>
+  <p>Join an audio or video call using your personal invitation.</p></header>
+  <p id="status" role="status" aria-live="polite">Checking invitation…</p>
+  <form id="join-form">
+    <label><input id="audio-only" type="checkbox"> Audio only</label>
+    <button id="join" type="submit" disabled>Join call</button>
+  </form>
+  <section class="videos" aria-label="Call participants">
+    <figure><video id="remote" autoplay playsinline></video><figcaption>Other participant</figcaption></figure>
+    <figure><video id="local" autoplay playsinline muted></video><figcaption>You</figcaption></figure>
+  </section>
+  <div class="controls" aria-label="Call controls">
+    <button id="mute" disabled aria-pressed="false">Mute microphone</button>
+    <button id="camera" disabled aria-pressed="false">Turn camera off</button>
+    <button id="play" hidden>Play incoming audio</button>
+    <button id="hangup" class="danger" disabled>End call</button>
+  </div>
+  <p class="note">Each invitation belongs to one participant. Keep yours private. Ending the call closes both invitations. Media is encrypted in transit by WebRTC; the server and your devices must also be trusted.</p>
+</main></body></html>

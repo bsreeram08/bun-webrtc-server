@@ -1,0 +1,15 @@
+{
+    "compilerOptions": {
+        "lib": ["ESNext"],
+        "target": "ESNext",
+        "module": "Preserve",
+        "moduleDetection": "force",
+        "moduleResolution": "bundler",
+        "types": ["bun"],
+        "strict": true,
+        "skipLibCheck": true,
+        "noEmit": true,
+        "allowImportingTsExtensions": true
+    },
+    "include": ["packages/signaling/**/*.ts", "packages/stun-server/native/**/*.ts", "tests/unit/**/*.ts", "scripts/setup.ts", "scripts/create-room.ts", "scripts/demo.ts"]
+}
