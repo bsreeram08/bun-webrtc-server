@@ -1,0 +1,417 @@
+{
+  "recorded": "2026-09-07",
+  "runs": [
+    {
+      "source": "/private/tmp/webrtc-direct-repro-json-candidates.json",
+      "browser": "153.0.8010.12",
+      "rounds": [
+        {
+          "mode": "same-page",
+          "video": true,
+          "pass": true,
+          "peers": [
+            {
+              "state": "connected",
+              "acceptedCandidateCalls": 5,
+              "remoteCandidates": 4,
+              "connectivityRequests": 9,
+              "connectivityResponses": 4,
+              "transceivers": [
+                {
+                  "stopped": false,
+                  "direction": "sendrecv"
+                },
+                {
+                  "stopped": false,
+                  "direction": "sendrecv"
+                }
+              ],
+              "media": [
+                {
+                  "kind": "audio",
+                  "bytesReceived": 938
+                },
+                {
+                  "kind": "video",
+                  "bytesReceived": 25710,
+                  "framesDecoded": 8
+                }
+              ]
+            },
+            {
+              "state": "connected",
+              "acceptedCandidateCalls": 9,
+              "remoteCandidates": 4,
+              "connectivityRequests": 9,
+              "connectivityResponses": 4,
+              "transceivers": [
+                {
+                  "stopped": false,
+                  "direction": "sendrecv"
+                },
+                {
+                  "stopped": false,
+                  "direction": "sendrecv"
+                }
+              ],
+              "media": [
+                {
+                  "kind": "audio",
+                  "bytesReceived": 938
+                },
+                {
+                  "kind": "video",
+                  "bytesReceived": 25710,
+                  "framesDecoded": 8
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "mode": "same-page",
+          "video": false,
+          "pass": true,
+          "peers": [
+            {
+              "state": "connected",
+              "acceptedCandidateCalls": 9,
+              "remoteCandidates": 4,
+              "connectivityRequests": 13,
+              "connectivityResponses": 3,
+              "transceivers": [
+                {
+                  "stopped": false,
+                  "direction": "sendrecv"
+                }
+              ],
+              "media": [
+                {
+                  "kind": "audio",
+                  "bytesReceived": 787
+                }
+              ]
+            },
+            {
+              "state": "connected",
+              "acceptedCandidateCalls": 9,
+              "remoteCandidates": 4,
+              "connectivityRequests": 13,
+              "connectivityResponses": 3,
+              "transceivers": [
+                {
+                  "stopped": false,
+                  "direction": "sendrecv"
+                }
+              ],
+              "media": [
+                {
+                  "kind": "audio",
+                  "bytesReceived": 787
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "mode": "same-page",
+          "video": true,
+          "pass": true,
+          "peers": [
+            {
+              "state": "connected",
+              "acceptedCandidateCalls": 9,
+              "remoteCandidates": 4,
+              "connectivityRequests": 176,
+              "connectivityResponses": 1,
+              "transceivers": [
+                {
+                  "stopped": false,
+                  "direction": "sendrecv"
+                },
+                {
+                  "stopped": false,
+                  "direction": "sendrecv"
+                }
+              ],
+              "media": [
+                {
+                  "kind": "audio",
+                  "bytesReceived": 596
+                },
+                {
+                  "kind": "video",
+                  "bytesReceived": 15450,
+                  "framesDecoded": 4
+                }
+              ]
+            },
+            {
+              "state": "connected",
+              "acceptedCandidateCalls": 13,
+              "remoteCandidates": 4,
+              "connectivityRequests": 177,
+              "connectivityResponses": 1,
+              "transceivers": [
+                {
+                  "stopped": false,
+                  "direction": "sendrecv"
+                },
+                {
+                  "stopped": false,
+                  "direction": "sendrecv"
+                }
+              ],
+              "media": [
+                {
+                  "kind": "audio",
+                  "bytesReceived": 596
+                },
+                {
+                  "kind": "video",
+                  "bytesReceived": 15450,
+                  "framesDecoded": 4
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "mode": "separate-contexts",
+          "video": true,
+          "pass": false,
+          "peers": [
+            {
+              "state": "connecting",
+              "acceptedCandidateCalls": 9,
+              "remoteCandidates": 4,
+              "connectivityRequests": 239,
+              "connectivityResponses": 0,
+              "transceivers": [
+                {
+                  "stopped": false,
+                  "direction": "sendrecv"
+                },
+                {
+                  "stopped": false,
+                  "direction": "sendrecv"
+                }
+              ],
+              "media": []
+            },
+            {
+              "state": "connecting",
+              "acceptedCandidateCalls": 13,
+              "remoteCandidates": 4,
+              "connectivityRequests": 239,
+              "connectivityResponses": 0,
+              "transceivers": [
+                {
+                  "stopped": false,
+                  "direction": "sendrecv"
+                },
+                {
+                  "stopped": false,
+                  "direction": "sendrecv"
+                }
+              ],
+              "media": []
+            }
+          ]
+        },
+        {
+          "mode": "separate-contexts",
+          "video": false,
+          "pass": true,
+          "peers": [
+            {
+              "state": "connected",
+              "acceptedCandidateCalls": 9,
+              "remoteCandidates": 4,
+              "connectivityRequests": 197,
+              "connectivityResponses": 1,
+              "transceivers": [
+                {
+                  "stopped": false,
+                  "direction": "sendrecv"
+                }
+              ],
+              "media": [
+                {
+                  "kind": "audio",
+                  "bytesReceived": 922
+                }
+              ]
+            },
+            {
+              "state": "connected",
+              "acceptedCandidateCalls": 9,
+              "remoteCandidates": 4,
+              "connectivityRequests": 197,
+              "connectivityResponses": 1,
+              "transceivers": [
+                {
+                  "stopped": false,
+                  "direction": "sendrecv"
+                }
+              ],
+              "media": [
+                {
+                  "kind": "audio",
+                  "bytesReceived": 864
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "mode": "separate-contexts",
+          "video": true,
+          "pass": false,
+          "peers": [
+            {
+              "state": "connecting",
+              "acceptedCandidateCalls": 9,
+              "remoteCandidates": 4,
+              "connectivityRequests": 239,
+              "connectivityResponses": 0,
+              "transceivers": [
+                {
+                  "stopped": false,
+                  "direction": "sendrecv"
+                },
+                {
+                  "stopped": false,
+                  "direction": "sendrecv"
+                }
+              ],
+              "media": []
+            },
+            {
+              "state": "connecting",
+              "acceptedCandidateCalls": 13,
+              "remoteCandidates": 4,
+              "connectivityRequests": 239,
+              "connectivityResponses": 0,
+              "transceivers": [
+                {
+                  "stopped": false,
+                  "direction": "sendrecv"
+                },
+                {
+                  "stopped": false,
+                  "direction": "sendrecv"
+                }
+              ],
+              "media": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "source": "/private/tmp/webrtc-direct-repro-30s.json",
+      "browser": "153.0.8010.12",
+      "rounds": [
+        {
+          "mode": "separate-contexts",
+          "video": true,
+          "pass": true,
+          "peers": [
+            {
+              "state": "connected",
+              "acceptedCandidateCalls": 9,
+              "remoteCandidates": 4,
+              "connectivityRequests": 155,
+              "connectivityResponses": 1,
+              "transceivers": [
+                {
+                  "stopped": false,
+                  "direction": "sendrecv"
+                },
+                {
+                  "stopped": false,
+                  "direction": "sendrecv"
+                }
+              ],
+              "media": [
+                {
+                  "kind": "audio",
+                  "bytesReceived": 1019
+                },
+                {
+                  "kind": "video",
+                  "bytesReceived": 25201,
+                  "framesDecoded": 9
+                }
+              ]
+            },
+            {
+              "state": "connected",
+              "acceptedCandidateCalls": 13,
+              "remoteCandidates": 4,
+              "connectivityRequests": 155,
+              "connectivityResponses": 1,
+              "transceivers": [
+                {
+                  "stopped": false,
+                  "direction": "sendrecv"
+                },
+                {
+                  "stopped": false,
+                  "direction": "sendrecv"
+                }
+              ],
+              "media": [
+                {
+                  "kind": "audio",
+                  "bytesReceived": 976
+                },
+                {
+                  "kind": "video",
+                  "bytesReceived": 24850,
+                  "framesDecoded": 9
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "mode": "separate-contexts",
+          "video": false,
+          "pass": false,
+          "peers": [
+            {
+              "state": "failed",
+              "acceptedCandidateCalls": 9,
+              "remoteCandidates": 0,
+              "connectivityRequests": 0,
+              "connectivityResponses": 0,
+              "transceivers": [
+                {
+                  "stopped": false,
+                  "direction": "sendrecv"
+                }
+              ],
+              "media": []
+            },
+            {
+              "state": "failed",
+              "acceptedCandidateCalls": 9,
+              "remoteCandidates": 0,
+              "connectivityRequests": 0,
+              "connectivityResponses": 0,
+              "transceivers": [
+                {
+                  "stopped": false,
+                  "direction": "sendrecv"
+                }
+              ],
+              "media": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

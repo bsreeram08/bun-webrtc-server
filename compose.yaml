@@ -1,0 +1,58 @@
+name: webrtc-bun
+services:
+  signaling:
+    build: .
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      HOST: 127.0.0.1
+      PORT: '3000'
+      TRUST_PROXY: 'true'
+      RELAY_ONLY: ${RELAY_ONLY:-false}
+      PUBLIC_ORIGIN: https://${DOMAIN:?Run bun --no-env-file scripts/setup.ts first}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?Missing admin token}
+      TURN_SECRET: ${TURN_SECRET:?Missing TURN secret}
+      TURN_URLS: turn:${TURN_HOST:?Missing TURN hostname}:3478?transport=udp,turn:${TURN_HOST}:3478?transport=tcp
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 256m
+    healthcheck:
+      test: [CMD, bun, -e, "const r = await fetch('http://127.0.0.1:3000/health'); process.exit(r.ok ? 0 : 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+  caddy:
+    image: caddy:2.11.4-alpine
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      DOMAIN: ${DOMAIN:?Missing domain}
+      ACME_EMAIL: ${ACME_EMAIL:?Missing certificate email}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      signaling:
+        condition: service_healthy
+    security_opt: [no-new-privileges:true]
+  turn:
+    image: coturn/coturn:4.17.2-r0
+    user: ${DEPLOY_UID:?Missing deployment uid}:${DEPLOY_GID:?Missing deployment gid}
+    cap_add: [NET_BIND_SERVICE]
+    restart: unless-stopped
+    network_mode: host
+    command: [-c, /etc/coturn/turnserver.conf]
+    volumes:
+      - ./deploy/turnserver.conf:/etc/coturn/turnserver.conf:ro
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    pids_limit: 128
+    mem_limit: 512m
+volumes:
+  caddy_data:
+  caddy_config:

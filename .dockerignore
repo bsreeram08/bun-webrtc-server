@@ -1,0 +1,13 @@
+**
+!packages/
+!packages/signaling/
+!packages/signaling/**
+!packages/stun-server/
+!packages/stun-server/native/
+!packages/stun-server/native/**
+!Dockerfile
+**/.env*
+**/*.pem
+**/*.key
+!scripts/
+!scripts/create-room.ts

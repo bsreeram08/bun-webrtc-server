@@ -1,23 +1,35 @@
 {
     "name": "webrtc-bun",
-    "module": "index.ts",
+    "module": "packages/signaling/server.ts",
     "type": "module",
     "scripts": {
+        "start": "bun --no-env-file packages/signaling/server.ts",
+        "dev": "bun --no-env-file --watch packages/signaling/server.ts",
+        "demo": "bun --no-env-file scripts/demo.ts",
+        "test": "bun --no-env-file test tests/unit",
+        "test:browser": "node tests/browser/call.mjs",
+        "typecheck": "tsc -p tsconfig.runtime.json",
+        "setup": "bun --no-env-file scripts/setup.ts",
+        "room:create": "bun --no-env-file scripts/create-room.ts",
+        "stun": "bun --no-env-file packages/stun-server/native/server.ts",
         "manager:s": "bun ./packages/manager/main.ts",
         "manager:w": "bun --watch ./packages/manager/main.ts",
         "stun-server:s": "bun ./packages/stun-server/main.ts",
         "stun-server:w": "bun --watch ./packages/stun-server/main.ts",
-        "stun-server:build-node": "sh ./scripts/build.stun-server.sh"
+        "stun-server:build-node": "sh ./scripts/build.stun-server-node.sh"
     },
     "devDependencies": {
-        "@types/bun": "latest",
+        "@types/bun": "1.4.1",
+        "@types/node": "26.5.0",
         "dotenv": "^16.4.5",
+        "fake-indexeddb": "^6.2.5",
+        "playwright-core": "1.63.0",
         "prettier": "^3.2.5",
         "prettier-plugin-organize-imports": "^3.2.4",
         "stun": "^2.1.0"
     },
     "peerDependencies": {
-        "typescript": "^5.4.3"
+        "typescript": "^7.0.2"
     },
     "dependencies": {
         "@elysiajs/bearer": "^1.0.2",
