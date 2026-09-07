@@ -65,6 +65,14 @@ try {
     return after;
   }));
   assert.deepEqual(sockets, ['wss:', 'wss:']);
+  async function exchangeChat(label) {
+    const message = `${label}-${crypto.randomUUID()}`;
+    await pages[0].locator('#chat-input').fill(message);
+    await pages[0].locator('#chat-send').click();
+    await pages[1].locator('#chat-log .message-text').filter({ hasText: message }).waitFor();
+    await pages[0].waitForFunction(text => [...document.querySelectorAll('#chat-log li')].some(row => row.dataset.status === 'delivered' && row.querySelector('.message-text')?.textContent === text), message);
+  }
+  await exchangeChat('video-chat');
   console.log(JSON.stringify({ stage: 'initial-media', turnTransport: process.env.TURN_TRANSPORT, peers: results }));
   const sustained = async () => {
     const read = page => page.evaluate(async () => ({ peerCount: window.testPeers.length,
@@ -99,6 +107,7 @@ try {
   assert.equal(await pages[0].evaluate(() => document.getElementById('local').srcObject.getAudioTracks()[0].enabled), false);
   await pages[0].getByRole('button', { name: 'Unmute microphone', exact: true }).click();
   await sustained();
+  await exchangeChat('recovered-video-chat');
   const restartCount = process.env.TURN_TRANSPORT === 'udp' ? 4 : 1;
   for (let restart = 0; restart < restartCount; restart++) {
     const previousUfrag = await pages[0].evaluate(() => window.testPeers.at(-1).localDescription.sdp.match(/a=ice-ufrag:([^\r\n]+)/)[1]);

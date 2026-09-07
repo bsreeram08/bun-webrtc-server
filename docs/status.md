@@ -1,12 +1,12 @@
 # Verification status
 
-Snapshot: 2026-09-07. The target is an independently deployable audio/video calling service, followed by a separate persistent chat application. The current implementation is a two-person invitation-based calling service. It is not yet verified as ready for public production use.
+Snapshot: 2026-09-07. The target is independently deployable calling and device-to-device chat with no backend chat storage. The current implementation uses two-person invitations, device-local history and encrypted portable backups. It is not yet verified as ready for public production use.
 
 ## Evidence collected
 
 | Area | Verified scope |
 | --- | --- |
-| Automated runtime checks | 67 tests with 23,272 assertions passed across `tests/unit/`: real Bun HTTP/WebSockets, IPv4/IPv6 UDP, malformed STUN datagrams, room isolation, reconnects, expiry, limits, configuration and setup. The actual browser script is also tested against controlled permission, network and timing events. TypeScript validation and a frozen-lockfile installation passed. |
+| Automated runtime checks | 83 tests with 23,371 assertions passed across `tests/unit/`: real Bun HTTP/WebSockets, IPv4/IPv6 UDP, malformed STUN datagrams, room isolation, reconnects, expiry, limits, configuration and setup. The actual browser script is also tested against controlled permission, network and timing events. TypeScript validation and a frozen-lockfile installation passed. |
 | Burst delivery | 40 rooms exchanged 2,560 signaling messages with exact ordering and contents, including large SDP followed by simultaneous ICE bursts. No Bun delivery loss was reproduced. |
 | ICE credential API | Tests verify room-bound authorization, HMAC credentials, expiry, absence of shared secrets in responses and relay-only configuration. |
 | Browser response policy | Tests verify CSP, permissions policy, referrer protection, content-type protection and static path restrictions. |
@@ -18,6 +18,7 @@ Snapshot: 2026-09-07. The target is an independently deployable audio/video call
 | Permission handling | The browser suite denied microphone permission, verified capture had not started, then granted permission and retried successfully. |
 | Reconnect isolation | A real-socket regression reproduced stale ICE reaching a rejoined participant. Server-issued pairing sessions now prevent that. Participant-authenticated HTTP deletion ends the room even when its WebSocket is disconnected. |
 | Browser lifetime controls | Tests exercise online events during pending permission, cancellation followed by late media acquisition, stuck WebSocket handshakes, bounded retries, capture cleanup and accurate offline-hangup status. |
+| Device-only chat and migration | Chromium passed chat-only sessions with no media requests, acknowledged bidirectional text, sender-device queuing while the peer was offline, ACK backpressure recovery, inert HTML rendering, and chat alongside video/reconnect. Distinct message markers were absent from captured HTTP and signaling frames. Real browser IndexedDB history survived reload and a genuinely offline reload. Encrypted exports restored in fresh browser contexts; wrong passwords failed, original expiry was preserved, and expired messages did not return from old backups. The full suite passed through TURN over both UDP and TCP. |
 | Full deployment call path | The repeatable Docker harness passed Caddy HTTPS/WSS and sustained bidirectional audio/video through coturn over UDP and TCP. Signaling reconnection preserved capture tracks and mute state. Four consecutive healthy ICE restarts passed on UDP, and another passed on TCP. These use synthetic media and disposable browser contexts that bypass certificate validation for the local test certificate; public ACME issuance is not covered. All test containers, newly pulled images and the dedicated builder/cache were removed and cleanup verified. |
 
 The deployment and container checks above were performed during the current implementation session. Re-run them after changing images, configuration or networking. A health response proves that HTTP is serving, not that a call succeeds.
@@ -28,7 +29,8 @@ The deployment and container checks above were performed during the current impl
 - Browser reconnection across real network changes, Safari/Firefox/mobile behavior and multiple physical devices remain separate validation tasks.
 - Deploy with real DNS, HTTPS certificates and firewall settings on a Linux host, then test two physical devices on different networks.
 - Verify physical microphones/cameras, missing-camera and unsupported-browser behavior. Synthetic audio-only and permission-denial/retry checks have passed.
-- Persistent chat, user accounts, message delivery/history, group calls and Signal-style identity verification are not implemented by the current deployment.
+- Chat migration is encrypted file export/import, with manual Google Drive storage. Installation and file selection on physical Android/iOS devices remain unverified. Automatic Drive upload and native background notifications are not implemented. See [device chat and migration](device-chat.md).
+- Persistent user identities, multi-device contact continuity, group calls and Signal-style identity verification are not implemented. Queued device messages need both apps connected within the invitation lifetime; this is not a background or server-mailbox delivery service.
 
 ## Reproduce automated checks
 

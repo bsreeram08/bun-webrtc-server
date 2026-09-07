@@ -22,6 +22,7 @@
         "@types/bun": "1.4.1",
         "@types/node": "26.5.0",
         "dotenv": "^16.4.5",
+        "fake-indexeddb": "^6.2.5",
         "playwright-core": "1.63.0",
         "prettier": "^3.2.5",
         "prettier-plugin-organize-imports": "^3.2.4",

@@ -1,6 +1,6 @@
 # Self-hosted audio and video calls
 
-This deployment runs Bun signaling, coturn authenticated media relay, and Caddy HTTPS. It does not require hosted identity services. Room creation requires the administrator token; participant invite links grant access to one room. It is an initial one-to-one calling service, not yet a persistent chat platform or a Signal replacement. No system can be guaranteed unhackable.
+This deployment runs Bun signaling, coturn authenticated media relay, and Caddy HTTPS. It does not require hosted identity services. Room creation requires the administrator token; participant invite links grant access to one room. It is an initial one-to-one calling and device-to-device chat service, not a Signal replacement. Message history stays on devices; the server has no chat storage. No system can be guaranteed unhackable.
 
 ## Prepare a Linux server
 
@@ -36,6 +36,6 @@ Rooms and participant credentials live in memory and are lost when Bun restarts.
 
 To inspect services, use `docker compose --env-file deploy/.env logs --tail=100`. Review logs locally before sharing them because peer addresses may appear. To update, review changes, back up `deploy/.env`, `deploy/turnserver.conf`, and the Caddy data volume, then rebuild with the start command above. Rotate both TURN secret copies together and restart signaling and TURN; rotate the administrator token in `deploy/.env` and restart signaling if compromised. Recreate containers with `docker compose --env-file deploy/.env up -d --force-recreate` after editing environment values. Running sessions will be interrupted.
 
-The deployment images use explicit versions. Keep those versions updated after reviewing release notes and validating calls. Persistent chat, user accounts, group conferencing and abuse administration remain separate future work.
+The deployment images use explicit versions. Keep those versions updated after reviewing release notes and validating calls. Persistent user identities, group conferencing and abuse administration remain separate future work. The browser app supports device-local chat history and encrypted backup files; see [device chat and phone migration](device-chat.md).
 
 References: [coturn configuration](https://github.com/coturn/coturn/blob/master/examples/etc/turnserver.conf), [coturn Docker setup](https://github.com/coturn/coturn/tree/master/docker/coturn), [Caddy automatic HTTPS](https://caddyserver.com/docs/automatic-https).

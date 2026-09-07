@@ -17,11 +17,15 @@ function browser(options: { offlineDelete?: boolean } = {}) {
     const history: string[] = [];
     function element(id: string) {
         if (!elements.has(id)) elements.set(id, {
-            disabled: false, checked: false, hidden: true, srcObject: null, textContent: '',
+            disabled: false, checked: false, hidden: true, srcObject: null, textContent: '', value: '', dataset: {}, children: [],
+            scrollHeight: 0, scrollTop: 0, clientHeight: 0,
             attributes: new Map<string, string>(), listeners: new Map<string, (event: unknown) => unknown>(),
             addEventListener(type: string, callback: (event: unknown) => unknown) { this.listeners.set(type, callback); },
             setAttribute(key: string, value: string) { this.attributes.set(key, value); },
             getAttribute(key: string) { return this.attributes.get(key); },
+            replaceChildren(...children: any[]) { this.children = children; },
+            append(...children: any[]) { this.children.push(...children); },
+            add(child: any) { this.children.push(child); },
             play: () => Promise.resolve(),
         });
         return elements.get(id);
@@ -53,14 +57,18 @@ function browser(options: { offlineDelete?: boolean } = {}) {
     class FakeDate extends Date { static now() { return now; } }
     const peer = class {
         addTrack() {} close() {}
+        createDataChannel(label: string) { return { label, ordered: true, maxRetransmits: null, maxPacketLifeTime: null, readyState: 'connecting', close() {} }; }
     };
+    const ChatStore = { list: async () => [], put: async () => {}, setStatus: async () => {} };
     const context = createContext({
-        URLSearchParams, Date: FakeDate, Promise, WebSocket: Socket, RTCPeerConnection: peer,
+        URL, URLSearchParams, TextEncoder, Date: FakeDate, Promise, WebSocket: Socket, RTCPeerConnection: peer,
+        Option: class { constructor(public text: string, public value: string) {} },
+        localStorage: { getItem: () => null, setItem: () => {} },
         AbortSignal: { timeout: () => new AbortController().signal },
-        location: { hash: `#${new URLSearchParams(invitation)}`, pathname: '/', protocol: 'http:', host: 'localhost:3000' },
+        location: { href: `http://localhost:3000/#${new URLSearchParams(invitation)}`, origin: 'http://localhost:3000', hash: `#${new URLSearchParams(invitation)}`, pathname: '/', protocol: 'http:', host: 'localhost:3000' },
         history: { replaceState(_state: unknown, _title: string, path: string) { history.push(path); } },
-        document: { getElementById: element },
-        window: { isSecureContext: true, RTCPeerConnection: peer, addEventListener(type: string, callback: () => void) { events.set(type, callback); } },
+        document: { getElementById: element, createElement: (tag: string) => element(tag), querySelector: element },
+        window: { ChatStore, isSecureContext: true, RTCPeerConnection: peer, addEventListener(type: string, callback: () => void) { events.set(type, callback); } },
         navigator: { mediaDevices: { getUserMedia() { mediaRequests++; return media; } } },
         fetch: async (url: string, init: RequestInit) => {
             requests.push({ url, init });
@@ -69,6 +77,7 @@ function browser(options: { offlineDelete?: boolean } = {}) {
         },
         setTimeout(callback: () => void, delay = 0) { const id = ++timerId; timers.set(id, { due: now + delay, callback }); return id; },
         clearTimeout(id: number) { timers.delete(id); },
+        setInterval() { return 1; },
     });
     runInContext(source, context, { filename: 'packages/signaling/public/app.js' });
     async function nextTimer() {
@@ -161,5 +170,15 @@ describe('browser capture and reconnect lifecycle', () => {
         expect(page.element('local').srcObject).toBeNull();
         expect(page.element('hangup').disabled).toBe(true);
         expect(page.timers.size).toBe(0);
+    });
+
+    test('a room ended by the other participant disables new message composition', async () => {
+        const page = browser(); page.acquire(); await page.join(); await flush();
+        expect(page.element('chat-send').disabled).toBe(false);
+        page.sockets[0].onclose?.({ code: 1000 }); await flush();
+        expect(page.element('chat-send').disabled).toBe(true);
+        expect(page.element('chat-input').disabled).toBe(true);
+        expect(page.tracks.every(track => track.readyState === 'ended')).toBe(true);
+        expect(page.element('status').textContent).toContain('Call ended');
     });
 });

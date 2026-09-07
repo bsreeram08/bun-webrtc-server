@@ -35,10 +35,12 @@ try {
   ownImages.push(`${id}:test`);
   console.log('Building isolated verification image…');
   await docker(['buildx', 'build', '--builder', id, '--load', '-t', `${id}:test`, '.']);
-  const imageHash = (await docker(['run', '--rm', '--entrypoint', 'sha256sum', `${id}:test`, '/app/packages/signaling/public/app.js'])).out.split(/\s/)[0];
-  const sourceHash = new Bun.CryptoHasher('sha256').update(await Bun.file(join(root, 'packages/signaling/public/app.js')).arrayBuffer()).digest('hex');
-  if (sourceHash !== imageHash) throw new Error('Client changed during image build; rerun verification');
-  console.log(`Verified client source SHA256 ${sourceHash}`);
+  for (const file of ['app.js', 'chat-store.js', 'sw.js', 'index.html', 'style.css', 'install.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png']) {
+    const imageHash = (await docker(['run', '--rm', '--entrypoint', 'sha256sum', `${id}:test`, `/app/packages/signaling/public/${file}`])).out.split(/\s/)[0];
+    const sourceHash = new Bun.CryptoHasher('sha256').update(await Bun.file(join(root, `packages/signaling/public/${file}`)).arrayBuffer()).digest('hex');
+    if (sourceHash !== imageHash) throw new Error('Client changed during image build; rerun verification');
+    console.log(`Verified ${file} SHA256 ${sourceHash}`);
+  }
   for (const image of images.slice(0, 2)) await docker(['pull', image]);
   const turn = `${id}-turn`; containers.push(turn);
   await docker(['run', '-d', '--name', turn, '-p', '127.0.0.1:33479:33479/udp', '-p', '127.0.0.1:33479:33479/tcp', '-p', '127.0.0.1:49400-49439:49400-49439/udp', '-e', `TEST_TURN_SECRET=${secret}`,
@@ -66,6 +68,10 @@ try {
       ...process.env, ADMIN_TOKEN: token, TEST_ORIGIN: 'https://localhost:9443', TURN_TRANSPORT: transport,
     }, stdout: 'inherit', stderr: 'inherit' });
     if (await child.exited) throw new Error(`Browser ${transport} verification failed`);
+    const chat = Bun.spawn(['node', 'tests/browser/chat.mjs'], { cwd: root, env: {
+      ...process.env, ADMIN_TOKEN: token, TEST_ORIGIN: 'https://localhost:9443', TEST_INSECURE_TLS: 'true', EXPECT_RELAY: 'true',
+    }, stdout: 'inherit', stderr: 'inherit' });
+    if (await chat.exited) throw new Error(`Device chat ${transport} verification failed`);
     await removeContainer(proxy);
     await removeContainer(app);
   }

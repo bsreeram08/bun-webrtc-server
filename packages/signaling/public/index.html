@@ -2,16 +2,25 @@
 <html lang="en">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="referrer" content="no-referrer">
-  <title>Private call</title><link rel="stylesheet" href="/style.css">
+  <meta name="referrer" content="no-referrer"><meta name="theme-color" content="#111820">
+  <title>Private conversations</title><link rel="stylesheet" href="/style.css"><link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/icon-192.png">
+  <script src="/chat-store.js" defer></script>
   <script src="/app.js" defer></script>
+  <script src="/install.js" defer></script>
 </head>
 <body><main>
-  <header><p class="eyebrow">YOUR SERVER · YOUR CONVERSATION</p><h1>Private call</h1>
-  <p>Join an audio or video call using your personal invitation.</p></header>
+  <header><p class="eyebrow">YOUR SERVER · YOUR CONVERSATION</p><h1>Private conversations</h1>
+  <p>Chat, talk, and see each other. Messages travel directly between your devices.</p></header>
+  <details id="invitation-panel"><summary>Open a personal invitation</summary>
+    <form id="invitation-form"><label for="invitation-input">Invitation link from this server</label>
+      <input id="invitation-input" type="url" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="Paste your personal invitation link">
+      <button id="invitation-load" type="submit">Open invitation</button></form>
+    <p class="note">Keep your invitation private. It stays in this page’s memory and is never included in a backup.</p>
+  </details>
   <p id="status" role="status" aria-live="polite">Checking invitation…</p>
   <form id="join-form">
     <label><input id="audio-only" type="checkbox"> Audio only</label>
+    <label><input id="chat-only" type="checkbox"> Chat only (no microphone or camera)</label>
     <button id="join" type="submit" disabled>Join call</button>
   </form>
   <section class="videos" aria-label="Call participants">
@@ -24,5 +33,26 @@
     <button id="play" hidden>Play incoming audio</button>
     <button id="hangup" class="danger" disabled>End call</button>
   </div>
-  <p class="note">Each invitation belongs to one participant. Keep yours private. Ending the call closes both invitations. Media is encrypted in transit by WebRTC; the server and your devices must also be trusted.</p>
+  <section class="chat-section" aria-labelledby="chat-heading"><h2 id="chat-heading">Messages</h2>
+    <label for="history-select">Conversation history on this device</label><select id="history-select"><option value="">No conversations yet</option></select>
+    <p id="chat-status" role="status" aria-live="polite">Open an invitation to send messages. Saved history is available on this device.</p>
+    <ol id="chat-log" aria-label="Messages" aria-live="polite" aria-relevant="additions text"></ol>
+    <form id="chat-form"><label for="chat-input">Message</label><textarea id="chat-input" rows="3" maxlength="4096" placeholder="Write a message" disabled></textarea>
+      <div class="compose-controls"><label for="disappear">Disappear after</label><select id="disappear"><option value="off">Off</option><option value="3600000">1 hour</option><option value="86400000">24 hours</option><option value="604800000">7 days</option></select>
+      <button id="chat-send" type="submit" disabled>Send message</button></div>
+      <p class="note">Applies to new messages, including queued messages. Delivery means saved by the other device, not read. Both devices must be online together to exchange messages.</p>
+    </form>
+  </section>
+  <details class="backup-section"><summary>Encrypted backup and restore</summary>
+    <p>Download an encrypted backup, then save the file in Google Drive or another place you choose. On your other phone, download that file and restore it here with the same password.</p>
+    <label for="backup-password">Backup password</label><input id="backup-password" type="password" autocomplete="off" minlength="12" placeholder="At least 12 characters">
+    <div class="backup-actions"><button id="backup-export">Download encrypted backup</button>
+    <label for="backup-file">Encrypted backup file</label><input id="backup-file" type="file" accept="application/json,.json">
+    <button id="backup-import">Restore backup</button></div>
+    <p id="backup-status" role="status" aria-live="polite"></p>
+    <p class="note">The password cannot be recovered. Backups contain messages, never invitation credentials. Disappearing messages retain their original expiry, but we cannot erase copies or older backup files held elsewhere.</p>
+    <button id="history-clear" class="danger">Delete local history</button>
+    <div id="clear-confirm" hidden><p>Delete every message saved in this browser? This does not delete another device’s messages or backup files. New messages can still arrive while connected.</p><button id="history-clear-confirm" class="danger">Delete all local messages</button><button id="history-clear-cancel">Keep messages</button></div>
+  </details>
+  <p class="note">Chat and media use encrypted WebRTC transport. Trust your devices and the server delivering this app; this is not Signal’s identity verification. Local history is readable by anyone with access to this browser. Clearing browser storage deletes its local copy. On phones, use your browser’s Add to Home Screen option. Keep the app open during conversations.</p>
 </main></body></html>

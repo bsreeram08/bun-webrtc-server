@@ -2,7 +2,7 @@
 
 Self-hosted one-to-one audio and video calls, using Bun for signaling and coturn for media relay. The browser client supports camera calls, audio-only calls, mute, camera controls, and ending a room. No Auth0 account, Redis server, or hosted communication service is required by the new runtime.
 
-This is a working foundation under active development. Persistent chat, account management, group calling, and Signal-style identity verification are future work. See [current status](docs/status.md) and [security boundaries](docs/security.md).
+This is a working foundation under active development. The installable browser app adds device-to-device text chat, device-local history, disappearing messages, and encrypted backup files you can keep in Google Drive. See [chat and phone migration](docs/device-chat.md). Account management, group calling, and Signal-style identity verification are future work. See [current status](docs/status.md) and [security boundaries](docs/security.md).
 
 To integrate calls into your own application, use the [calling API](docs/signaling-api.md). Room creation stays on your trusted backend; each participant receives a separate invitation.
 
