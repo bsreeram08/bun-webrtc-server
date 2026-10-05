@@ -37,6 +37,8 @@ The first identity a device sees for a contact — from the server's prekey bund
 
 After first use, a different identity for a contact (a reinstall, a new browser, or an attack) is never accepted silently. The conversation shows "security code changed", verification is cleared, messages that arrived under the new identity are marked, and **sending to that contact is paused**: outgoing messages stay queued on the device and are never encrypted to the new key until the user reviews the new code and accepts it. Server `keys` notifications only trigger this re-check. If the identity a new session uses disagrees with the one the server publishes for that contact, the message is discarded with a warning.
 
+The pinned identity is stored per contact user id and is never erased by burning a conversation, removing and re-adding a contact, or lost sessions; only clearing the browser's site data (which also removes this device's own keys) resets it. Until a changed code is accepted, the new identity may deliver flagged messages but cannot burn history or mark messages delivered. The comparison with the server's published identity is defence in depth only, since a hostile server controls that lookup too. Each conversation accepts at most 500 stored incoming messages, so one contact cannot fill the 2,000-message device limit for everyone else, and incoming timestamps more than five minutes in the future are rejected.
+
 Each account supports one messaging device at a time: signing in on a new browser creates a new identity, which replaces the old one for everyone (and shows them the change). Restoring an encrypted backup restores message history only, never keys, so contacts see a key change there too.
 
 ## Notifications

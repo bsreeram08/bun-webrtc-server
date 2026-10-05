@@ -122,6 +122,14 @@ try {
   await alice.waitForFunction(() => !document.getElementById('key-banner').hidden, null, { timeout: 15000 });
   if (!(await alice.textContent('#key-banner-text')).includes('Sending is paused')) throw new Error('Verified contact was not blocked after a key change');
   await shot(alice, 'e2e-3-key-change');
+  // Before alice accepts the new code, the new identity cannot burn her history.
+  await bob.click('#contact-list .contact.mutual .row-button');
+  await bob.click('#conv-menu summary'); await bob.click('#conv-burn'); await visible(bob, '#burn-confirm'); await bob.click('#burn-confirm-yes');
+  await bob.waitForFunction(() => /Burned on this device/.test(document.getElementById('chat-status').textContent), null, { timeout: 15000 });
+  await alice.waitForTimeout(2000);
+  if (!(await logText(alice)).includes('sealed end to end')) throw new Error('An unaccepted identity burned the conversation');
+  await bob.click('#conv-back');
+  step('a burn from the unaccepted new identity was ignored');
   await alice.click('#key-banner-review'); await visible(alice, '#safety');
   if ((await alice.textContent('#safety-number')) === codeA) throw new Error('Safety number did not change');
   await alice.click('#safety-accept');

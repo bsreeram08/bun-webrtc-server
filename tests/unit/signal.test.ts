@@ -326,6 +326,16 @@ describe('persistent box', () => {
         await A.acceptChange('bob');
         await expect(A.encryptTo('bob', { t: 'after review' }, async () => ({ identity: fake.identity, signedPreKey: fake.signedPreKey, oneTimePreKey: null }))).resolves.toBeTruthy();
     });
+    test('a pinned identity survives forgotten sessions and a later initial message from another key is a change', async () => {
+        const { alice, A, B, bundleOf } = await people();
+        await A.decryptFrom('bob', await B.encryptTo('alice', { t: 1 }, () => bundleOf(A)), async () => {});
+        await A.forget('bob'); // sessions only; the pin is kept (contact removal and burn never touch it)
+        expect(alice.map.get('peer:bob')).toBeTruthy();
+        const impostor = Signal.box(memory()), flags: boolean[] = [];
+        await A.decryptFrom('bob', await impostor.encryptTo('alice', { t: 'hi' }, () => bundleOf(A)), async (_m: any, info: any) => { flags.push(info.identityChanged); });
+        expect(flags).toEqual([true]);
+        expect((await A.safety('alice', 'bob', 'bob')).blocked).toBe(true);
+    });
     test('a change to either identity half counts as a new identity', async () => {
         const A = Signal.box(memory()), one = await Signal.generateIdentity(), two = await Signal.generateIdentity();
         await A.notePeer('bob', one.pub);

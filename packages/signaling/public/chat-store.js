@@ -1,6 +1,6 @@
 'use strict';
 (() => {
-  const MAX_MESSAGES = 2000, MAX_FILE = 10 * 1024 * 1024, MAX_AGE = 30 * 86400000;
+  const MAX_MESSAGES = 2000, MAX_PER_CONVERSATION = 500, CLOCK_SKEW = 300000, MAX_FILE = 10 * 1024 * 1024, MAX_AGE = 30 * 86400000;
   const ITERATIONS = 600000, encoder = new TextEncoder();
   const FIELDS = ['id', 'conversationId', 'direction', 'text', 'createdAt', 'status', 'expiresAt'];
   const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -92,14 +92,17 @@
   /**
    * Stores one decrypted incoming message, idempotent by id, using the same validation as every stored
    * record. Deterministic rejections carry a code so the caller acknowledges and discards the envelope
-   * instead of retrying forever: 'invalid', 'conflict' (an id reused with other content) and 'full'
-   * (the 2,000-message device cap; incoming messages are discarded with a notice rather than silently
-   * evicting history). Resolves to 'stored', 'duplicate' or 'expired'.
+   * instead of retrying forever: 'invalid' (including a timestamp more than five minutes in the future,
+   * which would pin a message to the end of every list), 'conflict' (an id reused with other content),
+   * 'conversation-full' (500 incoming messages from this conversation: only this sender is refused, so one
+   * contact cannot crowd out the others) and 'full' (the 2,000-message device cap). Nothing is evicted.
+   * Resolves to 'stored', 'duplicate' or 'expired'.
    */
   async function receive(conversationId, payload) {
     let message;
     try { message = validate({ id: payload?.id, conversationId, direction: 'incoming', text: payload?.text, createdAt: payload?.createdAt, status: 'delivered', expiresAt: payload?.expiresAt }); }
     catch { throw coded('invalid', 'Invalid incoming message.'); }
+    if (message.createdAt > Date.now() + CLOCK_SKEW) throw coded('invalid', 'Incoming message is dated in the future.');
     if (expired(message)) return 'expired';
     return transaction((active, now) => {
       if (expired(message, now)) return { result: 'expired' };
@@ -108,6 +111,9 @@
         if (FIELDS.some(field => field !== 'status' && previous[field] !== message[field])) throw coded('conflict', 'A message identifier was reused with different content.');
         return { result: 'duplicate' };
       }
+      let fromConversation = 0;
+      for (const value of active.values()) if (value.conversationId === conversationId && value.direction === 'incoming') fromConversation++;
+      if (fromConversation >= MAX_PER_CONVERSATION) throw coded('conversation-full', 'This conversation holds 500 incoming messages.');
       if (active.size >= MAX_MESSAGES) throw coded('full', 'This device holds 2,000 messages. Clear chat history to receive more.');
       return { writes: [message], result: 'stored' };
     });
@@ -118,7 +124,7 @@
    * Storage errors and anything uncoded or unknown are retried, and acknowledged with a notice only
    * after `limit` attempts. Every discard except a true replay is reported.
    */
-  const PERMANENT = { replay: null, full: 'storage-full', invalid: 'invalid', conflict: 'invalid', mismatch: 'invalid', malformed: 'undecryptable', auth: 'undecryptable', 'skip-limit': 'undecryptable', 'unknown-session': 'undecryptable', 'unknown-spk': 'undecryptable', 'claim-limit': 'undecryptable' };
+  const PERMANENT = { replay: null, full: 'storage-full', 'conversation-full': 'conversation-full', invalid: 'invalid', conflict: 'invalid', mismatch: 'invalid', malformed: 'undecryptable', auth: 'undecryptable', 'skip-limit': 'undecryptable', 'unknown-session': 'undecryptable', 'unknown-spk': 'undecryptable', 'claim-limit': 'undecryptable' };
   function inboundDisposition(error, attempts, limit = 3) {
     if (!error) return { ack: true, notice: null };
     if (typeof error.code === 'string' && Object.hasOwn(PERMANENT, error.code)) return { ack: true, notice: PERMANENT[error.code] };

@@ -152,19 +152,24 @@
     try {
       await box.decryptFrom(from.id, message.envelope, async (payload, info) => {
         checkPayload(payload);
-        // A new session must use the identity the server publishes for this contact, so the server's
-        // `from` label cannot attach one contact's session to another's conversation unnoticed.
+        // Defence in depth only: the pinned identity in signal.js (peer:<user id>, never deleted by burn,
+        // contact removal or forget) is the trust boundary, because a hostile server controls this lookup too.
+        // A mismatch with the published key still catches a mislabelled `from` from an honest-but-buggy relay.
         if (info.identity) {
           // A lookup that fails for network reasons is retried; only a real mismatch is discarded.
           const published = await api(`/api/keys/${from.username}/identity`).then(result => result.identity, error => { throw coded(error.status === 403 ? 'mismatch' : 'storage', error.message); });
           if (published.dh !== info.identity.dh || published.sign !== info.identity.sign) throw coded('mismatch', 'Identity mismatch');
         }
+        // Until the user accepts a changed security code, the new identity may deliver (flagged) messages
+        // but may not burn history or mark our messages delivered.
+        const untrusted = info.identityChanged || Boolean((await box.peer(from.id))?.blocked);
+        if (untrusted && payload.type !== 'message') return;
         try {
           if (payload.type === 'receipt') await window.ChatStore.setStatus(conversationId, payload.id, 'delivered');
           else if (payload.type === 'burn') { await window.ChatStore.removeConversation(conversationId); burned = true; }
           else if (await window.ChatStore.receive(conversationId, payload) === 'stored') {
             // Idempotent by message id: duplicates are neither shown, counted nor acknowledged twice.
-            if (info.identityChanged) await rememberFlag(payload.id.toLowerCase());
+            if (untrusted) await rememberFlag(payload.id.toLowerCase());
             if (!viewing()) unread[from.id] = (unread[from.id] || 0) + 1;
             receipt = payload.id;
           }
@@ -178,6 +183,7 @@
     if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'ack', id: message.id }));
     const notice = {
       'storage-full': `A message from ${from.username} was discarded: this device holds 2,000 messages. Clear some history to receive more.`,
+      'conversation-full': `A message from ${from.username} was discarded: this conversation holds 500 incoming messages. Burn or clear it to receive more from them.`,
       invalid: `A message from ${from.username} was invalid or did not match their published security code, and was discarded.`,
       'gave-up': `A message from ${from.username} could not be saved after several tries and was discarded.`,
       undecryptable: `A message from ${from.username} could not be decrypted and was discarded.`,

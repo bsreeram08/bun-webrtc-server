@@ -205,9 +205,22 @@ describe('incoming mailbox messages', () => {
     ]) await expect(store.receive(ROOM, bad)).rejects.toMatchObject({ code: 'invalid' });
     expect(await store.receive(ROOM, payload({ createdAt: NOW - 7200000, expiresAt: NOW - 3600000 }))).toBe('expired');
   });
+  test('one contact flooding fills only its own conversation; other contacts are still stored', async () => {
+    const { store } = fixture();
+    const other = 's'.repeat(43);
+    for (let index = 0; index < 500; index++) expect(await store.receive(ROOM, payload())).toBe('stored');
+    await expect(store.receive(ROOM, payload())).rejects.toMatchObject({ code: 'conversation-full' });
+    expect(store.inboundDisposition({ code: 'conversation-full' }, 1)).toEqual({ ack: true, notice: 'conversation-full' });
+    expect(await store.receive(other, payload())).toBe('stored');
+  });
+  test('incoming messages dated more than five minutes in the future are rejected', async () => {
+    const { store } = fixture();
+    await expect(store.receive(ROOM, payload({ createdAt: NOW + 600000 }))).rejects.toMatchObject({ code: 'invalid' });
+    expect(await store.receive(ROOM, payload({ createdAt: NOW + 60000 }))).toBe('stored');
+  });
   test('a flood from one contact fills the device cap with a deterministic "full" rejection instead of a stall', async () => {
     const { store } = fixture();
-    for (let index = 0; index < 2000; index++) expect(await store.receive(ROOM, payload())).toBe('stored');
+    for (let index = 0; index < 2000; index++) expect(await store.receive(`${'c'.repeat(42)}${'abcd'[index % 4]}`, payload())).toBe('stored');
     await expect(store.receive(ROOM, payload())).rejects.toMatchObject({ code: 'full' });
     expect(store.inboundDisposition({ code: 'full' }, 1)).toEqual({ ack: true, notice: 'storage-full' });
   });
