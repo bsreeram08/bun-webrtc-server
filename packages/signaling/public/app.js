@@ -5,7 +5,7 @@ let roomId = null, token = null, validInvite = false;
 let socket, stream, pc, config, sessionId, polite = false, ready = false, makingOffer = false;
 let ignoreOffer = false, settingAnswer = false, candidates = [], generation = 0, lifecycle = 0;
 let active = false, joining = false, connecting = false, sessionPrepared = false, reconnectTimer, restartTimer, handshakeTimer, reconnectSince = 0, reconnectAttempt = 0, iceRestarts = 0;
-let messages = Promise.resolve();
+let messages = Promise.resolve(), verifyTimer, verified = false;
 let dataChannel = null, flushTimer, requestChatFlush = null, chatBusy = false, historyRevision = 0, selectedHistory = '', transcriptSignature = '';
 let burnAck = null, peerBurned = false;
 const encoder = new TextEncoder();
@@ -189,6 +189,7 @@ function closePeer() {
   pc = null; sessionId = null; ready = false; candidates = [];
   makingOffer = false; ignoreOffer = false; settingAnswer = false; iceRestarts = 0;
   $('remote').srcObject = null;
+  clearTimeout(verifyTimer); verifyTimer = undefined;
   $('verify-code').hidden = true; $('verify-code').textContent = '';
 }
 function cleanup(message) {
@@ -244,6 +245,7 @@ function createPeer() {
     if (peer.connectionState === 'connected') {
       clearTimeout(restartTimer); restartTimer = undefined; iceRestarts = 0;
       status('Connected — your call is live.');
+      if (!verified && !verifyTimer) verifyTimer = setTimeout(() => { verifyTimer = undefined; if (pc === peer && !verified) showVerification('Could not verify this call — treat it as untrusted and end it.'); }, 15000);
     } else if (['disconnected', 'failed'].includes(peer.connectionState)) {
       status('Connection interrupted. Reconnecting your call…');
       recoverIce(peer);
@@ -260,11 +262,18 @@ function createPeer() {
     finally { if (pc === peer) makingOffer = false; }
   };
   if (!polite) attachChat(peer, peer.createDataChannel('chat-v1', { ordered: true }));
-  if (window.Verify) window.Verify.attach(peer, peer.createDataChannel('verify-v1', { negotiated: true, id: 1000, ordered: true }), result => {
-    if (pc !== peer) return;
-    $('verify-code').hidden = false;
-    $('verify-code').textContent = result.code ? `Verification code: ${result.code} — read it aloud with the other person. If it doesn't match, end the call: someone is in the middle.` : result.error;
-  });
+  // Fail closed: no code (missing script, blocked channel, timeout) is shown as an untrusted call.
+  const showVerification = text => { if (pc === peer) { $('verify-code').hidden = false; $('verify-code').textContent = text; } };
+  verified = false;
+  if (!window.Verify) showVerification('Verification unavailable — treat this call as untrusted.');
+  else {
+    showVerification('Verifying this call…');
+    window.Verify.attach(peer, peer.createDataChannel('verify-v1', { negotiated: true, id: 1000, ordered: true }), result => {
+      if (pc !== peer) return;
+      verified = Boolean(result.code); clearTimeout(verifyTimer); verifyTimer = undefined;
+      showVerification(result.code ? `Verification code: ${result.code} — read it aloud with the other person. If it doesn't match, end the call: someone is in the middle.` : result.error);
+    });
+  }
   return peer;
 }
 async function receive(message) {

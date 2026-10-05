@@ -52,7 +52,22 @@ describe('call verification code', () => {
     });
     test('extracts unique DTLS fingerprints from SDP', () => {
         expect(Verify.fingerprints(sdp(fp('ab')))).toBe(fp('AB'));
-        expect(Verify.fingerprints('v=0\r\n')).toBe('');
+        expect(() => Verify.fingerprints('v=0\r\n')).toThrow();
+    });
+    test('rejects decoy or non-canonical fingerprint lines a browser might parse differently', () => {
+        // A relay could pair a canonical decoy with a real line only the browser accepts.
+        expect(() => Verify.fingerprints(sdp(fp('AA')) + `a=fingerprint:${fp('BB')}\r\n`)).toThrow();
+        expect(() => Verify.fingerprints(`a=fingerprint:${fp('AA')}\r\na=fingerprint:sha-256  ${fp('BB').slice(8)}\r\n`)).toThrow();
+        expect(() => Verify.fingerprints(`a=fingerprint:${fp('AA')}\r\na=FINGERPRINT:${fp('BB')}\r\n`)).toThrow();
+        expect(() => Verify.fingerprints(`a=fingerprint:sha-1 ${Array(20).fill('AA').join(':')}\r\n`)).toThrow();
+    });
+    test('fails when the negotiated certificate differs from the signaled fingerprint', async () => {
+        const { a, b } = link(), results: Result[] = [];
+        const forged = { ...description(fp('AA'), fp('BB')), sctp: { transport: { getRemoteCertificates: () => [new Uint8Array([1, 2, 3]).buffer] } } };
+        Verify.attach(forged, a, result => { results[0] = result; });
+        Verify.attach(description(fp('BB'), fp('AA')), b, result => { results[1] = result; });
+        await settle();
+        expect(results[0]?.error).toContain('Verification failed');
     });
     test('two honest peers derive the same code', async () => {
         const { results } = await run([fp('AA'), fp('BB')], [fp('BB'), fp('AA')]);

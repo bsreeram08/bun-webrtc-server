@@ -7,13 +7,25 @@
   const LABEL = 'webrtc-bun-sas-v1', HEX = /^[0-9a-f]{64}$/, encoder = new TextEncoder();
   const hex = buffer => [...new Uint8Array(buffer)].map(byte => byte.toString(16).padStart(2, '0')).join('');
   const sha256 = async text => crypto.subtle.digest('SHA-256', encoder.encode(text));
+  // Fail closed on any fingerprint line we do not parse exactly: a lenient parser here
+  // could hash a decoy line while the browser authenticates DTLS with a different one.
   function fingerprints(sdp) {
     const values = new Set();
     for (const line of (sdp || '').split(/\r?\n/)) {
-      const match = /^a=fingerprint:(\S+) ([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2})+)$/.exec(line.trim());
-      if (match) values.add(`${match[1].toLowerCase()} ${match[2].toUpperCase()}`);
+      if (!/fingerprint/i.test(line)) continue;
+      const match = /^a=fingerprint:sha-256 ([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){31})$/.exec(line);
+      if (!match) throw new Error('Unsupported DTLS fingerprint');
+      values.add(`sha-256 ${match[1].toUpperCase()}`);
     }
-    return [...values].sort().join(',');
+    if (values.size !== 1) throw new Error('Expected exactly one DTLS fingerprint');
+    return [...values][0];
+  }
+  // Where the browser exposes the negotiated certificate, require it to match the SDP.
+  async function checkRemoteCertificate(peer, print) {
+    const certificate = peer.sctp?.transport?.getRemoteCertificates?.()[0];
+    if (!certificate) return;
+    const actual = 'sha-256 ' + hex(await crypto.subtle.digest('SHA-256', certificate)).toUpperCase().match(/../g).join(':');
+    if (actual !== print) throw new Error('DTLS certificate does not match the signaled fingerprint');
   }
   async function sasCode(prints, nonces) {
     if (prints.length !== 2 || nonces.length !== 2 || prints.some(value => !value) || nonces.some(value => !HEX.test(value))) throw new Error('Invalid verification input');
@@ -41,6 +53,7 @@
       if (hex(await sha256(packet.nonce)) !== peerCommit) throw new Error('Commitment mismatch');
       peerNonce = packet.nonce;
       const prints = [fingerprints(peer.localDescription?.sdp), fingerprints(peer.remoteDescription?.sdp)];
+      await checkRemoteCertificate(peer, prints[1]);
       finish({ code: await sasCode(prints, [nonce, peerNonce]) });
     });
     if (channel.readyState === 'open') channel.onopen();
