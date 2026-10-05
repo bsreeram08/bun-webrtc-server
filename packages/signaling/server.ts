@@ -97,7 +97,7 @@ export function startSignaling(options: SignalingOptions) {
     } });
     const server = Bun.serve({
         hostname: options.hostname ?? '127.0.0.1', port: options.port ?? 3000,
-        maxRequestBodySize: 16384,
+        maxRequestBodySize: 131072, // Encrypted envelopes up to 64 KiB, base64url in JSON.
         fetch(request, server) {
             const url = new URL(request.url);
             if (request.method === 'GET' && url.pathname === '/health') return json({ status: 'ok' });
@@ -105,7 +105,7 @@ export function startSignaling(options: SignalingOptions) {
             if (!allowRequest(source)) return json({ error: 'Rate limited' }, 429);
             const requestOrigin = request.headers.get('origin');
             if (requestOrigin && requestOrigin !== options.origin) return json({ error: 'Origin denied' }, 403);
-            if (request.method === 'GET' && ['/', '/app.js', '/account.js', '/chat-store.js', '/verify.js', '/vendor/simplewebauthn-browser.js', '/style.css', '/install.js', '/sw.js', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'].includes(url.pathname)) {
+            if (request.method === 'GET' && ['/', '/app.js', '/account.js', '/chat-store.js', '/signal.js', '/verify.js', '/vendor/simplewebauthn-browser.js', '/style.css', '/install.js', '/sw.js', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'].includes(url.pathname)) {
                 const path = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
                 return new Response(Bun.file(new URL(`./public/${path}`, import.meta.url)), { headers: {
                     'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; media-src 'self' blob:; img-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
@@ -176,7 +176,7 @@ export function startSignaling(options: SignalingOptions) {
                 }
             },
             message(socket, raw) {
-                if (socket.data.kind === 'events') { accounts!.events.message(socket as ServerWebSocket<EventsConnection>); return; }
+                if (socket.data.kind === 'events') { accounts!.events.message(socket as ServerWebSocket<EventsConnection>, raw); return; }
                 const { room, participant } = socket.data;
                 if (participant.socket !== socket || room.expiresAt <= now() || !rooms.has(room.id)) { socket.close(1008, 'Room expired'); return; }
                 if (!socket.data.allow()) { socket.close(1008, 'Rate limited'); return; }
@@ -205,6 +205,7 @@ export function startSignaling(options: SignalingOptions) {
                 if (!room.sessionId || message.sessionId !== room.sessionId) { socket.send(JSON.stringify({ type: 'error', error: 'Stale session' })); return; }
                 if (peer.send(JSON.stringify({ ...forwarded, sessionId: room.sessionId })) === 0) socket.send(JSON.stringify({ type: 'error', error: 'Delivery failed' }));
             },
+            drain(socket) { if (socket.data.kind === 'events') accounts!.events.drain(socket as ServerWebSocket<EventsConnection>); },
             close(socket) {
                 if (socket.data.kind === 'events') { accounts!.events.close(socket as ServerWebSocket<EventsConnection>); return; }
                 const { room, participant } = socket.data;
