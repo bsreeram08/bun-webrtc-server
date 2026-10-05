@@ -13,6 +13,10 @@ services:
       ADMIN_TOKEN: ${ADMIN_TOKEN:?Missing admin token}
       TURN_SECRET: ${TURN_SECRET:?Missing TURN secret}
       TURN_URLS: turn:${TURN_HOST:?Missing TURN hostname}:3478?transport=udp,turn:${TURN_HOST}:3478?transport=tcp
+      DATA_DIR: /data
+    volumes:
+      # Account database: usernames, passkey public keys, contacts and sessions. Never message content.
+      - signaling_data:/data
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
@@ -54,5 +58,6 @@ services:
     pids_limit: 128
     mem_limit: 512m
 volumes:
+  signaling_data:
   caddy_data:
   caddy_config:

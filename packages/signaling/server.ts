@@ -3,10 +3,11 @@ import type { ServerWebSocket } from 'bun';
 import { packetBudget } from '../stun-server/native/server';
 import { requestLimiter, requestSource } from './rate-limit';
 import { validateTurnUrl } from './config';
+import { createAccounts, openDatabase, type Accounts, type EventsConnection } from './accounts';
 
 type Participant = { digest: string; socket?: ServerWebSocket<Connection> };
-type Room = { id: string; expiresAt: number; participants: Participant[]; sessionId?: string };
-type Connection = { room: Room; participant: Participant; credential: string; allow: () => boolean };
+type Room = { id: string; expiresAt: number; participants: Participant[]; sessionId?: string; pair?: string[]; kind?: string };
+type Connection = { kind?: undefined; room: Room; participant: Participant; credential: string; allow: () => boolean };
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 const token = () => randomBytes(32).toString('base64url');
 const json = (value: unknown, status = 200) => Response.json(value, {
@@ -25,6 +26,8 @@ export type SignalingOptions = {
     turnUrls?: string[];
     relayOnly?: boolean;
     trustProxy?: boolean;
+    /** Enables passkey accounts, contacts and presence, stored in DATA_DIR. */
+    dataDir?: string;
 };
 
 export function startSignaling(options: SignalingOptions) {
@@ -44,24 +47,65 @@ export function startSignaling(options: SignalingOptions) {
     for (const url of options.turnUrls ?? []) validateTurnUrl(url);
     const allowRequest = requestLimiter();
     const adminDigest = Buffer.from(digest(options.adminToken), 'hex');
-    function remove(room: Room) {
-        rooms.delete(room.id);
+    const pairRooms = new Map<string, Room>();
+    // 4001 tells clients their room was replaced (for example by a new call); 4002 that the call was declined.
+    function remove(room: Room, code = 1000, reason = 'Room ended') {
+        if (!rooms.delete(room.id)) return;
         room.sessionId = undefined;
-        for (const participant of room.participants) participant.socket?.close(1000, 'Room ended');
+        for (const participant of room.participants) participant.socket?.close(code, reason);
+        if (room.pair) {
+            if (pairRooms.get(room.pair.join(':')) === room) pairRooms.delete(room.pair.join(':'));
+            accounts?.roomEnded(room.pair, room.id);
+        }
     }
     function sweep() {
         for (const room of rooms.values()) if (room.expiresAt <= now()) remove(room);
+        accounts?.sweep();
     }
+    function issue(participant: Participant) { const next = token(); participant.digest = digest(next); return next; }
+    let accounts: Accounts | undefined;
+    if (options.dataDir) accounts = createAccounts({ db: openDatabase(options.dataDir), origin: options.origin, now, calls: {
+        pairRoom(users, requester, kind) {
+            let room = pairRooms.get(users.join(':'));
+            // A call always gets a fresh room; a chat reuses the live one.
+            if (room && (kind !== 'chat' || room.expiresAt <= now())) { remove(room, 4001, 'Room replaced'); room = undefined; }
+            if (!room) {
+                sweep();
+                if (rooms.size >= maxRooms) return 'full';
+                room = { id: token(), expiresAt: now() + lifetime, participants: users.map(() => ({ digest: '' })), pair: users, kind };
+                rooms.set(room.id, room); pairRooms.set(users.join(':'), room);
+            }
+            const mine = room.participants[users.indexOf(requester)]!, theirs = room.participants[1 - users.indexOf(requester)]!;
+            if (mine.socket) return 'busy';
+            return { roomId: room.id, token: issue(mine), peerToken: theirs.socket ? undefined : issue(theirs) };
+        },
+        declinePairRoom(users, roomId) {
+            const room = pairRooms.get(users.join(':'));
+            if (room?.id !== roomId) return false;
+            remove(room, 4002, 'Call declined'); return true;
+        },
+        endPair(users) { const room = pairRooms.get(users.join(':')); if (room) remove(room); },
+        waitingFor(userId) {
+            const waiting = [];
+            for (const room of pairRooms.values()) {
+                const index = room.pair!.indexOf(userId);
+                if (index < 0 || room.expiresAt <= now() || room.participants[index]!.socket || !room.participants[1 - index]!.socket) continue;
+                waiting.push({ roomId: room.id, peerId: room.pair![1 - index]!, kind: room.kind!, token: issue(room.participants[index]!) });
+            }
+            return waiting;
+        },
+    } });
     const server = Bun.serve({
         hostname: options.hostname ?? '127.0.0.1', port: options.port ?? 3000,
-        maxRequestBodySize: 1024,
+        maxRequestBodySize: 16384,
         fetch(request, server) {
             const url = new URL(request.url);
             if (request.method === 'GET' && url.pathname === '/health') return json({ status: 'ok' });
-            if (!allowRequest(requestSource(server.requestIP(request)?.address, request.headers, options.trustProxy))) return json({ error: 'Rate limited' }, 429);
+            const source = requestSource(server.requestIP(request)?.address, request.headers, options.trustProxy);
+            if (!allowRequest(source)) return json({ error: 'Rate limited' }, 429);
             const requestOrigin = request.headers.get('origin');
             if (requestOrigin && requestOrigin !== options.origin) return json({ error: 'Origin denied' }, 403);
-            if (request.method === 'GET' && ['/', '/app.js', '/chat-store.js', '/verify.js', '/style.css', '/install.js', '/sw.js', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'].includes(url.pathname)) {
+            if (request.method === 'GET' && ['/', '/app.js', '/account.js', '/chat-store.js', '/verify.js', '/vendor/simplewebauthn-browser.js', '/style.css', '/install.js', '/sw.js', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'].includes(url.pathname)) {
                 const path = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
                 return new Response(Bun.file(new URL(`./public/${path}`, import.meta.url)), { headers: {
                     'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; media-src 'self' blob:; img-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
@@ -69,6 +113,7 @@ export function startSignaling(options: SignalingOptions) {
                     'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store',
                 } });
             }
+            if (url.pathname.startsWith('/api/')) return accounts ? accounts.handle(request, url, server, source) : json({ error: 'Not found' }, 404);
             const roomMatch = /^\/rooms\/([A-Za-z0-9_-]{43})(\/ice)?$/.exec(url.pathname);
             if (roomMatch && (roomMatch[2] && request.method === 'GET' || !roomMatch[2] && request.method === 'DELETE')) {
                 const authorization = request.headers.get('authorization') ?? '';
@@ -108,7 +153,7 @@ export function startSignaling(options: SignalingOptions) {
             return json({ error: 'Not found' }, 404);
         },
         websocket: {
-            data: {} as Connection,
+            data: {} as Connection | EventsConnection,
             maxPayloadLength: 65536,
             backpressureLimit: 131072,
             closeOnBackpressureLimit: true,
@@ -116,22 +161,22 @@ export function startSignaling(options: SignalingOptions) {
             sendPings: true,
             perMessageDeflate: false,
             open(socket) {
+                if (socket.data.kind === 'events') { accounts!.events.open(socket as ServerWebSocket<EventsConnection>); return; }
                 const { room, participant, credential } = socket.data;
                 // Repeat the check after upgrade to cover simultaneous uses of one token,
                 // including an upgrade that raced the rotation of that token.
                 if (participant.socket || participant.digest !== credential || room.expiresAt <= now() || !rooms.has(room.id)) { socket.close(1008, 'Participant unavailable'); return; }
-                participant.socket = socket;
+                participant.socket = socket as ServerWebSocket<Connection>;
                 // Invitations are single-use: each accepted connection replaces the credential,
                 // so a copied or leaked link cannot rejoin, fetch ICE or end the room later.
-                const next = token();
-                participant.digest = digest(next);
-                socket.send(JSON.stringify({ type: 'welcome', polite: room.participants.indexOf(participant) === 1, token: next }));
+                socket.send(JSON.stringify({ type: 'welcome', polite: room.participants.indexOf(participant) === 1, token: issue(participant) }));
                 if (room.participants.every(value => value.socket)) {
                     room.sessionId = token();
                     for (const member of room.participants) member.socket!.send(JSON.stringify({ type: 'ready', sessionId: room.sessionId }));
                 }
             },
             message(socket, raw) {
+                if (socket.data.kind === 'events') { accounts!.events.message(socket as ServerWebSocket<EventsConnection>); return; }
                 const { room, participant } = socket.data;
                 if (participant.socket !== socket || room.expiresAt <= now() || !rooms.has(room.id)) { socket.close(1008, 'Room expired'); return; }
                 if (!socket.data.allow()) { socket.close(1008, 'Rate limited'); return; }
@@ -161,6 +206,7 @@ export function startSignaling(options: SignalingOptions) {
                 if (peer.send(JSON.stringify({ ...forwarded, sessionId: room.sessionId })) === 0) socket.send(JSON.stringify({ type: 'error', error: 'Delivery failed' }));
             },
             close(socket) {
+                if (socket.data.kind === 'events') { accounts!.events.close(socket as ServerWebSocket<EventsConnection>); return; }
                 const { room, participant } = socket.data;
                 if (participant.socket !== socket) return;
                 participant.socket = undefined;
@@ -171,13 +217,13 @@ export function startSignaling(options: SignalingOptions) {
     });
     const timer = setInterval(sweep, 1000);
     timer.unref();
-    return { server, stop() { clearInterval(timer); rooms.clear(); return server.stop(true); } };
+    return { server, accounts, stop() { clearInterval(timer); rooms.clear(); return server.stop(true); } };
 }
 
 if (import.meta.main) {
     const rawPort = process.env.PORT ?? '3000';
     if (!/^\d+$/.test(rawPort) || Number(rawPort) < 1 || Number(rawPort) > 65535) throw new Error('PORT must be 1–65535');
-    const app = startSignaling({ adminToken: process.env.ADMIN_TOKEN ?? '', origin: process.env.PUBLIC_ORIGIN ?? 'http://localhost:3000', hostname: process.env.HOST ?? '127.0.0.1', port: Number(rawPort), turnSecret: process.env.TURN_SECRET, turnUrls: process.env.TURN_URLS?.split(',').map(value => value.trim()).filter(Boolean), relayOnly: process.env.RELAY_ONLY === 'true', trustProxy: process.env.TRUST_PROXY === 'true' });
+    const app = startSignaling({ adminToken: process.env.ADMIN_TOKEN ?? '', origin: process.env.PUBLIC_ORIGIN ?? 'http://localhost:3000', hostname: process.env.HOST ?? '127.0.0.1', port: Number(rawPort), turnSecret: process.env.TURN_SECRET, turnUrls: process.env.TURN_URLS?.split(',').map(value => value.trim()).filter(Boolean), relayOnly: process.env.RELAY_ONLY === 'true', trustProxy: process.env.TRUST_PROXY === 'true', dataDir: process.env.ACCOUNTS === 'off' ? undefined : process.env.DATA_DIR || 'data' });
     console.log(`Signaling listening on ${app.server.url}`);
     for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, async () => { await app.stop(); process.exit(0); });
 }

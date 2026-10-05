@@ -35,7 +35,7 @@ try {
   ownImages.push(`${id}:test`);
   console.log('Building isolated verification image…');
   await docker(['buildx', 'build', '--builder', id, '--load', '-t', `${id}:test`, '.']);
-  for (const file of ['app.js', 'chat-store.js', 'verify.js', 'sw.js', 'index.html', 'style.css', 'install.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png']) {
+  for (const file of ['app.js', 'account.js', 'vendor/simplewebauthn-browser.js', 'chat-store.js', 'verify.js', 'sw.js', 'index.html', 'style.css', 'install.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png']) {
     const imageHash = (await docker(['run', '--rm', '--entrypoint', 'sha256sum', `${id}:test`, `/app/packages/signaling/public/${file}`])).out.split(/\s/)[0];
     const sourceHash = new Bun.CryptoHasher('sha256').update(await Bun.file(join(root, `packages/signaling/public/${file}`)).arrayBuffer()).digest('hex');
     if (sourceHash !== imageHash) throw new Error('Client changed during image build; rerun verification');
@@ -49,7 +49,7 @@ try {
   for (const transport of ['udp', 'tcp']) {
     const app = `${id}-${transport}-app`, proxy = `${id}-${transport}-proxy`;
     containers.push(app);
-    await docker(['run', '-d', '--name', app, '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges:true', '-p', '127.0.0.1:9443:9443',
+    await docker(['run', '-d', '--name', app, '--read-only', '--tmpfs', '/data:uid=1000,gid=1000,mode=0700', '--cap-drop=ALL', '--security-opt=no-new-privileges:true', '-p', '127.0.0.1:9443:9443',
       '-e', 'HOST=127.0.0.1', '-e', 'PORT=3000', '-e', 'TRUST_PROXY=true', '-e', 'PUBLIC_ORIGIN=https://localhost:9443', '-e', `ADMIN_TOKEN=${token}`,
       '-e', `TURN_SECRET=${secret}`, '-e', `TURN_URLS=turn:127.0.0.1:33479?transport=${transport}`, '-e', 'RELAY_ONLY=true', `${id}:test`]);
     containers.push(proxy);

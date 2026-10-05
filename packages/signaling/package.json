@@ -1,0 +1,8 @@
+{
+    "name": "@webrtc-bun/signaling",
+    "private": true,
+    "type": "module",
+    "dependencies": {
+        "@simplewebauthn/server": "14.0.3"
+    }
+}

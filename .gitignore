@@ -175,3 +175,6 @@ dist
 .DS_Store
 trash
 build/
+
+# Account database (passkeys, contacts, sessions)
+data/

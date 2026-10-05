@@ -11,3 +11,6 @@
 **/*.key
 !scripts/
 !scripts/create-room.ts
+!scripts/create-invite.ts
+**/node_modules
+**/data

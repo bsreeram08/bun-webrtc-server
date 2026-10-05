@@ -11,5 +11,5 @@
         "noEmit": true,
         "allowImportingTsExtensions": true
     },
-    "include": ["packages/signaling/**/*.ts", "packages/stun-server/native/**/*.ts", "tests/unit/**/*.ts", "scripts/setup.ts", "scripts/create-room.ts", "scripts/demo.ts"]
+    "include": ["packages/signaling/**/*.ts", "packages/stun-server/native/**/*.ts", "tests/unit/**/*.ts", "scripts/setup.ts", "scripts/create-room.ts", "scripts/create-invite.ts", "scripts/demo.ts"]
 }
