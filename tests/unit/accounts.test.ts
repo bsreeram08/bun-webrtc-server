@@ -105,6 +105,11 @@ describe('invites and passkey registration', () => {
         expect(response.status).toBe(400);
         expect(((await response.json()) as any).error).toBe('Sign-in failed.');
     });
+    test('one source cannot exhaust pending sign-in challenges', async () => {
+        const statuses = [];
+        for (let index = 0; index < 6; index++) statuses.push((await post('/api/login/options', {})).status);
+        expect(statuses).toEqual([200, 200, 200, 200, 200, 503]);
+    });
     test('authentication endpoints are rate limited per source', async () => {
         const statuses = await Promise.all(Array.from({ length: 14 }, () => post('/api/login/options', {}).then(response => response.status)));
         expect(statuses).toContain(429);
@@ -161,6 +166,17 @@ describe('contacts and conversations', () => {
         expect(await ghost.text()).toBe(await real.text());
         const listed = ((await (await api('/api/contacts', { cookie: alice.cookie })).json()) as any).contacts;
         expect(listed).toEqual([{ id: null, username: 'bob', state: 'outgoing', online: false }, { id: null, username: 'ghost', state: 'outgoing', online: false }]);
+    });
+    test('registering a requested username reveals nothing about earlier requests and cannot accept them', async () => {
+        const alice = user('alice');
+        expect((await post('/api/contacts', { username: 'bob' }, alice.cookie)).status).toBe(202);
+        await Bun.sleep(5);
+        const squatter = user('bob');
+        expect(((await (await api('/api/contacts', { cookie: squatter.cookie })).json()) as any).contacts).toEqual([]);
+        expect((await post('/api/contacts/alice/accept', {}, squatter.cookie)).status).toBe(404);
+        expect((await post('/api/contacts', { username: 'alice' }, squatter.cookie)).status).toBe(202);
+        const listed = ((await (await api('/api/contacts', { cookie: alice.cookie })).json()) as any).contacts;
+        expect(listed.find((contact: any) => contact.username === 'bob').state).not.toBe('mutual');
     });
     test('pending outgoing requests are capped', async () => {
         const alice = user('alice');

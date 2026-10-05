@@ -60,7 +60,7 @@ export function createAccounts(options: { db: Database; origin: string; now: () 
     const { db, now, calls } = options;
     const origin = new URL(options.origin), rpID = origin.hostname, secure = origin.protocol === 'https:';
     const cookieName = secure ? '__Host-session' : 'session';
-    const flows = new Map<string, { kind: 'register' | 'login'; challenge: string; expiresAt: number; invite?: string; username?: string; userId?: string }>();
+    const flows = new Map<string, { kind: 'register' | 'login'; challenge: string; expiresAt: number; source: string; invite?: string; username?: string; userId?: string }>();
     const listeners = new Map<string, Set<ServerWebSocket<EventsConnection>>>();
     const allowAuth = requestLimiter({ perSource: 10, global: 100 });
 
@@ -106,7 +106,10 @@ export function createAccounts(options: { db: Database; origin: string; now: () 
     }
     function addFlow(flow: Omit<NonNullable<ReturnType<typeof takeFlow>>, 'expiresAt'>) {
         for (const [id, value] of flows) if (value.expiresAt <= now()) flows.delete(id);
-        if (flows.size >= 2000) return null;
+        // Per-source cap: one client cannot exhaust the pool and lock everyone out of signing in.
+        let fromSource = 0;
+        for (const value of flows.values()) if (value.source === flow.source) fromSource++;
+        if (fromSource >= 5 || flows.size >= 10000) return null;
         const id = random(16);
         flows.set(id, { ...flow, expiresAt: now() + FLOW_LIFETIME });
         return id;
@@ -118,10 +121,18 @@ export function createAccounts(options: { db: Database; origin: string; now: () 
         // Outgoing requests show only the typed username: never whether that account exists.
         const outgoing = db.query<{ username: string }, [string, number]>('SELECT username FROM contact_requests WHERE user_id = ? AND created_at > ?').all(me.id, live)
             .map(row => ({ id: null, username: row.username, state: 'outgoing', online: false }));
-        const incoming = db.query<{ id: string; username: string }, [string, number]>('SELECT u.id, u.username FROM contact_requests r JOIN users u ON u.id = r.user_id WHERE r.username = ? AND r.created_at > ?').all(me.username, live)
+        // Only requests sent after this account existed: whoever later registers a requested
+        // username must not learn who asked for it, nor be able to accept on its behalf.
+        const since = Math.max(live, db.query<{ created_at: number }, [string]>('SELECT created_at FROM users WHERE id = ?').get(me.id)!.created_at - 1);
+        const incoming = db.query<{ id: string; username: string }, [string, number]>('SELECT u.id, u.username FROM contact_requests r JOIN users u ON u.id = r.user_id WHERE r.username = ? AND r.created_at > ?').all(me.username, since)
             .map(row => ({ id: row.id, username: row.username, state: 'incoming', online: false }));
         const seen = new Set(mutualRows.map(row => row.username));
         return [...mutualRows, ...incoming.filter(row => !seen.has(row.username)), ...outgoing.filter(row => !seen.has(row.username))].sort((a, b) => a.username.localeCompare(b.username));
+    }
+    /** A live request from `from` to `me`, sent after `me` registered (squatted usernames see nothing). */
+    function requested(from: User, me: User) {
+        const since = Math.max(now() - REQUEST_LIFETIME, db.query<{ created_at: number }, [string]>('SELECT created_at FROM users WHERE id = ?').get(me.id)!.created_at - 1);
+        return Boolean(db.query('SELECT 1 FROM contact_requests WHERE user_id = ? AND username = ? AND created_at > ?').get(from.id, me.username, since));
     }
     function befriend(a: User, b: User) {
         db.transaction(() => {
@@ -160,7 +171,7 @@ export function createAccounts(options: { db: Database; origin: string; now: () 
                 rpName: 'Private conversations', rpID, userName: username, userID: new TextEncoder().encode(userId), attestationType: 'none',
                 authenticatorSelection: { residentKey: 'required', userVerification: 'preferred' },
             });
-            const flowId = addFlow({ kind: 'register', challenge: registration.challenge, invite, username, userId });
+            const flowId = addFlow({ kind: 'register', challenge: registration.challenge, source, invite, username, userId });
             return flowId ? json({ flowId, options: registration }) : json({ error: 'Busy, try again' }, 503);
         }
         if (path === '/api/register/verify' && request.method === 'POST') {
@@ -189,7 +200,7 @@ export function createAccounts(options: { db: Database; origin: string; now: () 
         if (path === '/api/login/options' && request.method === 'POST') {
             // Usernameless: discoverable credentials, so the server never reveals which accounts exist.
             const authentication = await generateAuthenticationOptions({ rpID, userVerification: 'preferred' });
-            const flowId = addFlow({ kind: 'login', challenge: authentication.challenge });
+            const flowId = addFlow({ kind: 'login', challenge: authentication.challenge, source });
             return flowId ? json({ flowId, options: authentication }) : json({ error: 'Busy, try again' }, 503);
         }
         if (path === '/api/login/verify' && request.method === 'POST') {
@@ -234,7 +245,7 @@ export function createAccounts(options: { db: Database; origin: string; now: () 
             const target = userByName(username);
             const live = now() - REQUEST_LIFETIME;
             // Same answer whether or not the account exists; asking someone who already asked us accepts them.
-            if (target && db.query('SELECT 1 FROM contact_requests WHERE user_id = ? AND username = ? AND created_at > ?').get(target.id, user.username, live)) befriend(user, target);
+            if (target && requested(target, user)) befriend(user, target);
             else if (!(target && mutual(user.id, target.id))) {
                 db.query('DELETE FROM contact_requests WHERE created_at <= ?').run(live);
                 const pending = db.query<{ count: number }, [string]>('SELECT COUNT(*) AS count FROM contact_requests WHERE user_id = ?').get(user.id)!.count;
@@ -248,7 +259,7 @@ export function createAccounts(options: { db: Database; origin: string; now: () 
         if (contactMatch) {
             const target = userByName(contactMatch[1]!);
             if (contactMatch[2] && request.method === 'POST') {
-                if (!target || !db.query('SELECT 1 FROM contact_requests WHERE user_id = ? AND username = ? AND created_at > ?').get(target.id, user.username, now() - REQUEST_LIFETIME)) return json({ error: 'No request from that person.' }, 404);
+                if (!target || !requested(target, user)) return json({ error: 'No request from that person.' }, 404);
                 befriend(user, target);
                 return json({ status: 'accepted' });
             }
