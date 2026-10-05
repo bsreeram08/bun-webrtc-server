@@ -11,6 +11,13 @@ let burnAck = null, peerBurned = false;
 const encoder = new TextEncoder();
 const messageIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const chatStatus = text => { $('chat-status').textContent = text; };
+// Body data attributes drive layout: lobby, call or chat, plus the open sheet/panel.
+const view = (key, value) => { $('app').dataset[key] = value; };
+const setJoinable = on => {
+  for (const id of ['join', 'join-audio', 'join-chat']) $(id).disabled = !on;
+  $('audio-only').disabled = !on || $('chat-only').checked; $('chat-only').disabled = !on;
+};
+const clock = time => new Date(time).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
 function parseInvitation(value) {
   const url = new URL(value);
@@ -26,8 +33,8 @@ function openInvitation(value) {
   const next = parseInvitation(value);
   lifecycle++; roomId = next.id; token = next.credential; validInvite = true; selectedHistory = roomId; peerBurned = false;
   $('invitation-input').value = ''; $('invitation-panel').open = false;
-  $('join').disabled = false; $('audio-only').disabled = $('chat-only').checked; $('chat-only').disabled = false;
-  status('Invitation ready. Join with video, audio only, or chat only.');
+  setJoinable(true);
+  status('Invitation ready. Choose how to join.');
   refreshHistory();
 }
 function updateComposer() {
@@ -42,12 +49,14 @@ async function refreshHistory() {
     if (!window.ChatStore) throw new Error('Local message storage is unavailable.');
     const records = await window.ChatStore.list();
     if (revision !== historyRevision) return;
-    const ids = [...new Set(records.map(record => record.conversationId))].reverse();
+    const ids = [...new Set(records.map(record => record.conversationId))].reverse(), lastAt = new Map();
+    for (const record of records) lastAt.set(record.conversationId, Math.max(lastAt.get(record.conversationId) || 0, record.createdAt));
     if (roomId && !ids.includes(roomId)) ids.unshift(roomId);
     if (!selectedHistory || !ids.includes(selectedHistory)) selectedHistory = roomId || ids[0] || '';
     const selector = $('history-select'); selector.replaceChildren();
     if (!ids.length) selector.add(new Option('No conversations yet', ''));
-    for (const id of ids) selector.add(new Option(`${id === roomId ? 'Current' : 'Saved'} conversation · ${id.slice(0, 8)}`, id));
+    for (const id of ids) selector.add(new Option(id === roomId ? 'This conversation' : `Earlier conversation — ${new Date(lastAt.get(id)).toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${clock(lastAt.get(id))}`, id));
+    view('history', ids.length ? 'yes' : 'no');
     selector.value = selectedHistory;
     const log = $('chat-log'), wasNearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
     const visible = records.filter(record => record.conversationId === selectedHistory).slice(-2000);
@@ -60,7 +69,10 @@ async function refreshHistory() {
         const text = document.createElement('p'); text.className = 'message-text'; text.textContent = record.text;
         const meta = document.createElement('small'); meta.className = 'message-meta';
         const delivery = { queued: 'Queued on this device', sent: 'Sent · delivery unconfirmed', delivered: 'Delivered to device', uncertain: 'Restored · delivery unconfirmed' }[record.status];
-        meta.textContent = `${record.direction === 'outgoing' ? 'You' : 'Other participant'} · ${new Date(record.createdAt).toLocaleString()} · ${delivery}${record.expiresAt ? ' · Disappears ' + new Date(record.expiresAt).toLocaleString() : ''}`;
+        const detail = `${record.direction === 'outgoing' ? 'You' : 'Other participant'} · ${new Date(record.createdAt).toLocaleString()} · ${delivery}${record.expiresAt ? ' · Disappears ' + new Date(record.expiresAt).toLocaleString() : ''}`;
+        const mark = record.direction === 'outgoing' ? { queued: ' 🕓', sent: ' ✓', delivered: ' ✓✓', uncertain: ' ?' }[record.status] : '';
+        meta.textContent = `${record.expiresAt ? '⏱ ' : ''}${clock(record.createdAt)}${mark}`;
+        meta.setAttribute('aria-label', detail); row.title = detail;
         row.append(text, meta); log.append(row);
       }
       if (wasNearBottom) log.scrollTop = log.scrollHeight;
@@ -190,7 +202,7 @@ function closePeer() {
   makingOffer = false; ignoreOffer = false; settingAnswer = false; iceRestarts = 0;
   $('remote').srcObject = null;
   clearTimeout(verifyTimer); verifyTimer = undefined;
-  $('verify-code').hidden = true; $('verify-code').textContent = '';
+  $('verify-code').hidden = true; $('verify-digits').textContent = ''; $('verify-label').textContent = '';
 }
 function cleanup(message) {
   active = false; sessionPrepared = false; lifecycle++;
@@ -203,6 +215,7 @@ function cleanup(message) {
   for (const id of ['mute', 'camera', 'hangup']) $(id).disabled = true;
   $('play').hidden = true; joining = false; connecting = false; reconnectSince = 0; reconnectAttempt = 0;
   $('invitation-load').disabled = false; $('invitation-input').disabled = false;
+  view('state', 'lobby'); view('sheet', ''); view('panel', ''); $('chat-toggle').setAttribute('aria-expanded', 'false');
   status(message);
 }
 function matchesGeneration(peer, candidate) {
@@ -244,8 +257,8 @@ function createPeer() {
     if (pc !== peer) return;
     if (peer.connectionState === 'connected') {
       clearTimeout(restartTimer); restartTimer = undefined; iceRestarts = 0;
-      status('Connected — your call is live.');
-      if (!verified && !verifyTimer) verifyTimer = setTimeout(() => { verifyTimer = undefined; if (pc === peer && !verified) showVerification('Could not verify this call — treat it as untrusted and end it.'); }, 15000);
+      status(stream ? 'Connected — your call is live.' : 'Connected — chat is end-to-end encrypted.');
+      if (!verified && !verifyTimer) verifyTimer = setTimeout(() => { verifyTimer = undefined; if (pc === peer && !verified) showVerification('warn', 'Could not verify — treat this call as untrusted and end it.'); }, 15000);
     } else if (['disconnected', 'failed'].includes(peer.connectionState)) {
       status('Connection interrupted. Reconnecting your call…');
       recoverIce(peer);
@@ -263,15 +276,21 @@ function createPeer() {
   };
   if (!polite) attachChat(peer, peer.createDataChannel('chat-v1', { ordered: true }));
   // Fail closed: no code (missing script, blocked channel, timeout) is shown as an untrusted call.
-  const showVerification = text => { if (pc === peer) { $('verify-code').hidden = false; $('verify-code').textContent = text; } };
+  const showVerification = (kind, label, code = '') => {
+    if (pc !== peer) return;
+    const badge = $('verify-code'); badge.hidden = false; badge.dataset.kind = kind;
+    $('verify-digits').textContent = code; $('verify-label').textContent = label;
+    badge.title = code ? `Verification code ${code}. Read it aloud with the other person. If it doesn't match, end the call: someone is in the middle.` : label;
+  };
   verified = false;
-  if (!window.Verify) showVerification('Verification unavailable — treat this call as untrusted.');
+  if (!window.Verify) showVerification('warn', 'Verification unavailable — treat this call as untrusted.');
   else {
-    showVerification('Verifying this call…');
+    showVerification('pending', 'Verifying this call…');
     window.Verify.attach(peer, peer.createDataChannel('verify-v1', { negotiated: true, id: 1000, ordered: true }), result => {
       if (pc !== peer) return;
       verified = Boolean(result.code); clearTimeout(verifyTimer); verifyTimer = undefined;
-      showVerification(result.code ? `Verification code: ${result.code} — read it aloud with the other person. If it doesn't match, end the call: someone is in the middle.` : result.error);
+      if (result.code) showVerification('ok', 'Read aloud to verify', result.code);
+      else showVerification('warn', result.error);
     });
   }
   return peer;
@@ -385,8 +404,11 @@ async function connectSocket(current) {
 $('join-form').addEventListener('submit', async event => {
   event.preventDefault();
   if (joining || !validInvite) return;
+  const choice = event.submitter?.value;
+  if (choice) { $('chat-only').checked = choice === 'chat'; $('audio-only').checked = choice === 'audio'; }
   joining = true; active = true; sessionPrepared = false; const current = ++lifecycle;
-  $('join').disabled = true; $('audio-only').disabled = true; $('chat-only').disabled = true; $('hangup').disabled = false;
+  setJoinable(false); $('hangup').disabled = false;
+  view('state', $('chat-only').checked ? 'chat' : 'call'); view('media', $('audio-only').checked ? 'audio' : 'video');
   $('invitation-load').disabled = true; $('invitation-input').disabled = true;
   status($('chat-only').checked ? 'Preparing your chat connection…' : 'Preparing your microphone and call connection…');
   try {
@@ -399,24 +421,24 @@ $('join-form').addEventListener('submit', async event => {
     if (!active || current !== lifecycle) return;
     sessionPrepared = true;
     $('mute').disabled = !stream; $('camera').disabled = !stream?.getVideoTracks().length;
-    $('mute').setAttribute('aria-pressed', 'false'); $('mute').textContent = 'Mute microphone';
-    $('camera').setAttribute('aria-pressed', 'false'); $('camera').textContent = 'Turn camera off';
+    $('mute').setAttribute('aria-pressed', 'false'); $('mute').setAttribute('aria-label', 'Mute microphone'); $('mute-cap').textContent = 'Mute';
+    $('camera').setAttribute('aria-pressed', 'false'); $('camera').setAttribute('aria-label', 'Turn camera off'); $('camera-cap').textContent = 'Camera';
     await connectSocket(current);
   } catch (error) {
     if (current !== lifecycle) return;
     cleanup(error.name === 'NotAllowedError' ? 'Microphone or camera permission denied. Allow access, then try again.' : error.name === 'NotFoundError' ? 'No microphone or camera found. Connect a device or try audio only.' : 'Unable to join. Check your invitation, connection, and media permissions.');
-    $('join').disabled = false; $('audio-only').disabled = $('chat-only').checked; $('chat-only').disabled = false;
+    setJoinable(true);
   }
 });
 $('mute').onclick = () => {
   const muted = $('mute').getAttribute('aria-pressed') !== 'true';
   stream?.getAudioTracks().forEach(track => { track.enabled = !muted; });
-  $('mute').setAttribute('aria-pressed', String(muted)); $('mute').textContent = muted ? 'Unmute microphone' : 'Mute microphone';
+  $('mute').setAttribute('aria-pressed', String(muted)); $('mute').setAttribute('aria-label', muted ? 'Unmute microphone' : 'Mute microphone'); $('mute-cap').textContent = muted ? 'Unmute' : 'Mute';
 };
 $('camera').onclick = () => {
   const off = $('camera').getAttribute('aria-pressed') !== 'true';
   stream?.getVideoTracks().forEach(track => { track.enabled = !off; });
-  $('camera').setAttribute('aria-pressed', String(off)); $('camera').textContent = off ? 'Turn camera on' : 'Turn camera off';
+  $('camera').setAttribute('aria-pressed', String(off)); $('camera').setAttribute('aria-label', off ? 'Turn camera on' : 'Turn camera off'); $('camera-cap').textContent = off ? 'Camera on' : 'Camera';
 };
 $('play').onclick = () => $('remote').play().then(() => { $('play').hidden = true; }).catch(() => status('Use your browser’s audio controls to allow playback.'));
 async function endRoom(ended) {
@@ -431,7 +453,15 @@ async function endRoom(ended) {
   } catch { if (stoppedLifecycle === lifecycle) status('Call stopped locally. Could not end the room while offline.'); }
 }
 $('hangup').onclick = () => endRoom('Call ended.');
-$('burn').onclick = () => { $('burn-confirm').hidden = false; };
+$('burn').onclick = () => { $('menu').open = false; $('burn-confirm').hidden = false; };
+$('settings-open').onclick = () => { $('menu').open = false; $('settings').open = true; view('panel', 'settings'); };
+$('settings-close').onclick = () => view('panel', '');
+const toggleChat = open => {
+  view('sheet', open ? 'open' : ''); $('chat-toggle').setAttribute('aria-expanded', String(open));
+  if (open) { const log = $('chat-log'); log.scrollTop = log.scrollHeight; }
+};
+$('chat-toggle').onclick = () => toggleChat($('app').dataset.sheet !== 'open');
+$('chat-close').onclick = () => toggleChat(false);
 $('burn-cancel').onclick = () => { $('burn-confirm').hidden = true; };
 $('burn-confirm-yes').onclick = async () => {
   $('burn-confirm').hidden = true;
@@ -458,10 +488,6 @@ window.addEventListener('online', () => {
   } else if (pc) recoverIce(pc, true);
 });
 window.addEventListener('pagehide', () => cleanup('Call closed.'));
-$('chat-only').onchange = () => {
-  $('audio-only').disabled = $('chat-only').checked;
-  document.querySelector('.videos').hidden = $('chat-only').checked;
-};
 $('invitation-form').addEventListener('submit', event => {
   event.preventDefault();
   try { openInvitation($('invitation-input').value.trim()); }
@@ -482,12 +508,18 @@ $('chat-form').addEventListener('submit', async event => {
   try {
     await window.ChatStore.put({ id: crypto.randomUUID(), conversationId: roomId, direction: 'outgoing', text, createdAt, status: 'queued', expiresAt: duration ? createdAt + duration : null });
     requestChatFlush?.();
-    $('chat-input').value = '';
+    $('chat-input').value = ''; resizeComposer();
     chatStatus(dataChannel?.readyState === 'open' ? 'Message queued for encrypted delivery.' : 'Queued on this device. Both participants need a valid invitation and a connection to exchange it.');
     await refreshHistory();
   } catch (error) { chatStatus(error.message || 'Could not save this message.'); }
   finally { chatBusy = false; updateComposer(); }
 });
+// Single-row composer that grows with its text; Enter sends on devices with a keyboard.
+function resizeComposer() { const input = $('chat-input'); if (!input.style) return; input.style.height = 'auto'; input.style.height = `${Math.min(input.scrollHeight, 160)}px`; }
+$('chat-input').oninput = resizeComposer;
+$('chat-input').onkeydown = event => {
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && matchMedia('(pointer: fine)').matches) { event.preventDefault(); $('chat-form').requestSubmit(); }
+};
 const disappearingPreferenceKey = 'private-chat-disappearing-v1';
 try { const preference = localStorage.getItem(disappearingPreferenceKey); if (['off', '3600000', '86400000', '604800000'].includes(preference)) $('disappear').value = preference; } catch {}
 $('disappear').onchange = () => { try { localStorage.setItem(disappearingPreferenceKey, $('disappear').value); } catch {} };
@@ -523,6 +555,6 @@ if (!window.isSecureContext || !window.RTCPeerConnection) status('Conversations 
 else {
   const incoming = location.href; history.replaceState(null, '', location.pathname);
   if (new URL(incoming).hash) { try { openInvitation(incoming); } catch (error) { status(error.message); $('invitation-panel').open = true; } }
-  else { status('Open your personal invitation to connect, or read saved messages below.'); $('invitation-panel').open = true; }
+  else { status('Open your invitation link to connect. Saved messages stay below.'); $('invitation-panel').open = true; }
 }
 refreshHistory();

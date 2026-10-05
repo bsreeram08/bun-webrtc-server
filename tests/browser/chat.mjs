@@ -93,6 +93,10 @@ async function waitStored(page, text, present = true) {
 }
 async function openBackup(page) {
   const section = page.locator('details.backup-section');
+  // During a session, settings open as a sheet from the overflow menu.
+  if (await page.locator('#app').getAttribute('data-state') !== 'lobby' && await page.locator('#app').getAttribute('data-panel') !== 'settings') {
+    await page.locator('#menu summary').click(); await page.locator('#settings-open').click();
+  }
   if (!await section.evaluate(element => element.open)) await section.locator('summary').click();
 }
 async function waitServiceWorker(page) {
@@ -131,8 +135,7 @@ try {
   const peers = await Promise.all([pageForDevice(), pageForDevice()]);
   for (let i = 0; i < peers.length; i++) {
     await peers[i].goto(`${origin}/#${new URLSearchParams({ roomId: room.roomId, token: room.participants[i].token })}`);
-    await peers[i].locator('#chat-only').check();
-    await peers[i].locator('#join').click();
+    await peers[i].locator('#join-chat').click();
     if (i === 0) {
       await peers[0].locator('#chat-input').fill(marker);
       await peers[0].locator('#chat-send').click();

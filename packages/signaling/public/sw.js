@@ -1,5 +1,5 @@
 'use strict';
-const CACHE = 'private-conversations-shell-v2';
+const CACHE = 'private-conversations-shell-v3';
 const ASSETS = ['/', '/app.js', '/chat-store.js', '/verify.js', '/style.css', '/install.js', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS)));

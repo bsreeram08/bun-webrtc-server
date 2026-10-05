@@ -35,7 +35,7 @@ try {
     });
     await page.goto(`${origin}/#roomId=${room.roomId}&token=${room.participants[index].token}`);
     assert.equal(await page.evaluate(() => isSecureContext), true);
-    await page.getByRole('button', { name: 'Join call', exact: true }).click();
+    await page.getByRole('button', { name: 'Video call', exact: true }).click();
   }));
   const results = await Promise.all(pages.map(async page => {
     await page.waitForFunction(() => document.getElementById('status').textContent.startsWith('Connected'), null, { timeout: 45000 });
@@ -67,10 +67,13 @@ try {
   assert.deepEqual(sockets, ['wss:', 'wss:']);
   async function exchangeChat(label) {
     const message = `${label}-${crypto.randomUUID()}`;
+    // During a call, messages live in a sheet opened from the call controls.
+    for (const page of pages) if (await page.locator('#app').getAttribute('data-sheet') !== 'open') await page.locator('#chat-toggle').click();
     await pages[0].locator('#chat-input').fill(message);
     await pages[0].locator('#chat-send').click();
     await pages[1].locator('#chat-log .message-text').filter({ hasText: message }).waitFor();
     await pages[0].waitForFunction(text => [...document.querySelectorAll('#chat-log li')].some(row => row.dataset.status === 'delivered' && row.querySelector('.message-text')?.textContent === text), message);
+    for (const page of pages) await page.locator('#chat-close').click();
   }
   await exchangeChat('video-chat');
   console.log(JSON.stringify({ stage: 'initial-media', turnTransport: process.env.TURN_TRANSPORT, peers: results }));

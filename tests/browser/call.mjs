@@ -23,13 +23,13 @@ try {
     const page = await context.newPage();
     page.on('pageerror', error => errors.push(error.message));
     await page.goto(`${origin}/#roomId=${room.roomId}&token=${room.participants[0].token}`);
-    await page.getByRole('button', { name: 'Join call', exact: true }).click();
+    await page.getByRole('button', { name: 'Video call', exact: true }).click();
     await page.waitForFunction(() => document.getElementById('status').textContent.includes('permission denied'));
-    assert.equal(await page.getByRole('button', { name: 'Join call', exact: true }).isEnabled(), true);
+    assert.equal(await page.getByRole('button', { name: 'Video call', exact: true }).isEnabled(), true);
     assert.equal(await page.evaluate(() => document.getElementById('local').srcObject), null);
     assert.equal(await page.getByRole('button', { name: 'End call', exact: true }).isDisabled(), true);
     await context.grantPermissions(['microphone', 'camera']);
-    await page.getByRole('button', { name: 'Join call', exact: true }).click();
+    await page.getByRole('button', { name: 'Video call', exact: true }).click();
     await page.waitForFunction(() => {
       const stream = document.getElementById('local').srcObject;
       return stream?.getAudioTracks().some(track => track.readyState === 'live') &&
@@ -80,8 +80,7 @@ try {
       });
       await page.goto(`${origin}/#roomId=${room.roomId}&token=${room.participants[index].token}`);
       assert.equal(new URL(page.url()).hash, '', 'Invitation removed from address/history');
-      if (audioOnly) await page.getByLabel('Audio only').check();
-      await page.getByRole('button', { name: 'Join call', exact: true }).click();
+      await page.getByRole('button', { name: audioOnly ? 'Voice call' : 'Video call', exact: true }).click();
     }));
     await Promise.all(pages.map(page => page.waitForFunction(() => document.getElementById('status').textContent.startsWith('Connected'), null, { timeout: 30000 }).catch(async error => {
       console.error('Connection diagnostic', JSON.stringify(await page.evaluate(async () => ({ status: document.getElementById('status').textContent, signals: window.testSignals, iceAdds: window.testIceAdds, peers: await Promise.all(window.testPeers.map(async peer => ({ state: peer.connectionState, signaling: peer.signalingState, ice: peer.iceConnectionState, local: peer.localDescription?.sdp.split('\r\n').filter(line => /fingerprint|ice-ufrag/.test(line)), remote: peer.remoteDescription?.sdp.split('\r\n').filter(line => /fingerprint|ice-ufrag/.test(line)), stats: Array.from((await peer.getStats()).values()).filter(stat => ['candidate-pair', 'local-candidate', 'remote-candidate', 'transport'].includes(stat.type)) }))) }))));
