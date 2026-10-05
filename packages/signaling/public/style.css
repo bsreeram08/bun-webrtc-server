@@ -192,6 +192,16 @@ body[data-state="chat"] #settings { position: fixed; z-index: 40; inset: auto 0 
 .contact { position: relative; display: flex; align-items: center; gap: 12px; padding: 12px 4px; border-bottom: 1px solid var(--line); }
 .contact-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .contact-text small { color: var(--muted); font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.contact-side { align-self: stretch; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+.contact.unread .contact-text small { color: var(--text); }
+.contact.unread time { color: var(--accent); }
+.badge { min-width: 22px; height: 22px; padding: 0 7px; border-radius: 11px; background: var(--accent); color: var(--accent-ink); font-size: 12px; font-weight: 700; display: grid; place-items: center; font-variant-numeric: tabular-nums; }
+.key-banner { display: flex; align-items: center; gap: 10px; margin: 0; padding: 10px 14px; background: var(--warn-bg); color: var(--warn); border-bottom: 1px solid #6b5a2a; font-size: 14px; }
+.key-banner span { flex: 1; }
+.key-banner button { padding: 6px 12px; font-size: 14px; border-radius: 16px; background: transparent; border-color: var(--warn); color: var(--warn); }
+.safety-number { font: 600 20px/1.6 ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: .04em; color: var(--text) !important; text-align: center; word-spacing: .4em; margin: 12px 0 !important; }
+#safety .dialog-actions { flex-wrap: wrap; }
+#chat-log li.flagged { outline: 1px dashed var(--warn); }
 .contact time { align-self: flex-start; color: var(--muted); font-size: 12px; padding-top: 2px; font-variant-numeric: tabular-nums; }
 .contact > button:not(.row-button) { padding: 7px 12px; font-size: 14px; border-radius: 18px; position: relative; z-index: 1; }
 .row-button { position: absolute; inset: 0; background: transparent; border: 0; border-radius: 12px; padding: 0; }

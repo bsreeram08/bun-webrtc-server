@@ -43,7 +43,7 @@ function updateComposer() {
   const canCompose = (validInvite || accountChat) && selectedHistory === conversationId && Boolean(window.ChatStore);
   $('chat-input').disabled = !canCompose || chatBusy;
   $('chat-send').disabled = !canCompose || chatBusy;
-  $('burn').disabled = $('conv-burn').disabled = !validInvite || chatBusy;
+  $('burn').disabled = $('conv-burn').disabled = !(validInvite || accountChat) || chatBusy;
 }
 async function refreshHistory() {
   const revision = ++historyRevision;
@@ -73,8 +73,12 @@ async function refreshHistory() {
         const delivery = { queued: 'Queued on this device', sent: 'Sent · delivery unconfirmed', delivered: 'Delivered to device', uncertain: 'Restored · delivery unconfirmed' }[record.status];
         const detail = `${record.direction === 'outgoing' ? 'You' : peerName === 'the other participant' ? 'Other participant' : peerName} · ${new Date(record.createdAt).toLocaleString()} · ${delivery}${record.expiresAt ? ' · Disappears ' + new Date(record.expiresAt).toLocaleString() : ''}`;
         const mark = record.direction === 'outgoing' ? { queued: ' 🕓', sent: ' ✓', delivered: ' ✓✓', uncertain: ' ?' }[record.status] : '';
-        meta.textContent = `${record.expiresAt ? '⏱ ' : ''}${clock(record.createdAt)}${mark}`;
-        meta.setAttribute('aria-label', detail); row.title = detail;
+        // Messages that arrived under a changed security code stay marked until the code is reviewed.
+        const flagged = Boolean(window.App?.flagged?.(record));
+        meta.textContent = `${flagged ? '⚠ ' : ''}${record.expiresAt ? '⏱ ' : ''}${clock(record.createdAt)}${mark}`;
+        if (flagged) row.classList.add('flagged');
+        const label = flagged ? `${detail} · Sent under a new security code` : detail;
+        meta.setAttribute('aria-label', label); row.title = label;
         row.append(text, meta); log.append(row);
       }
       if (wasNearBottom) log.scrollTop = log.scrollHeight;
@@ -245,7 +249,8 @@ function createPeer() {
   const peer = new RTCPeerConnection(config); pc = peer;
   for (const track of stream?.getTracks() || []) peer.addTrack(track, stream);
   peer.ondatachannel = ({ channel }) => {
-    if (pc !== peer || !polite) { channel.close(); return; }
+    // Contact chats travel through the end-to-end encrypted mailbox, not the call's data channel.
+    if (pc !== peer || !polite || accountChat) { channel.close(); return; }
     attachChat(peer, channel);
   };
   peer.onicecandidate = ({ candidate }) => { if (pc === peer) send({ type: 'candidate', candidate }); };
@@ -277,7 +282,7 @@ function createPeer() {
     } catch { if (pc === peer) cleanup('Could not negotiate this call. Reopen your invitation to try again.'); }
     finally { if (pc === peer) makingOffer = false; }
   };
-  if (!polite) attachChat(peer, peer.createDataChannel('chat-v1', { ordered: true }));
+  if (!polite && !accountChat) attachChat(peer, peer.createDataChannel('chat-v1', { ordered: true }));
   // Fail closed: no code (missing script, blocked channel, timeout) is shown as an untrusted call.
   const showVerification = (kind, label, code = '') => {
     if (pc !== peer) return;
@@ -470,6 +475,13 @@ $('chat-close').onclick = () => toggleChat(false);
 $('burn-cancel').onclick = () => { $('burn-confirm').hidden = true; };
 $('burn-confirm-yes').onclick = async () => {
   $('burn-confirm').hidden = true;
+  if (accountChat && window.App?.onBurn && !chatBusy) {
+    chatBusy = true; updateComposer();
+    try { await window.App.onBurn(); }
+    catch (error) { chatStatus(error.message || 'Could not burn this conversation.'); }
+    finally { chatBusy = false; updateComposer(); refreshHistory(); }
+    return;
+  }
   if (!validInvite || chatBusy) return;
   chatBusy = true; updateComposer();
   const conversation = conversationId;
@@ -514,10 +526,9 @@ $('chat-form').addEventListener('submit', async event => {
   const createdAt = Date.now(), duration = Number($('disappear').value) || 0;
   try {
     await window.ChatStore.put({ id: crypto.randomUUID(), conversationId, direction: 'outgoing', text, createdAt, status: 'queued', expiresAt: duration ? createdAt + duration : null });
-    requestChatFlush?.();
     $('chat-input').value = ''; resizeComposer();
-    if (dataChannel?.readyState === 'open') chatStatus('');
-    else if (accountChat) { chatStatus(`Will send when ${peerName} is online.`); window.App?.onQueued?.(); }
+    if (accountChat) window.App?.onQueued?.(); // Encrypted and posted to the mailbox by account.js.
+    else if (requestChatFlush?.(), dataChannel?.readyState === 'open') chatStatus('');
     else chatStatus('Queued on this device. Both participants need a valid invitation and a connection to exchange it.');
     await refreshHistory();
   } catch (error) { chatStatus(error.message || 'Could not save this message.'); }
@@ -572,11 +583,11 @@ else {
   // Hooks for account.js: contact conversations reuse this call and chat engine unchanged.
 window.App = {
   get active() { return active; }, get roomId() { return roomId; }, get conversationId() { return conversationId; },
-  status, refreshHistory, view,
+  status, chatStatus, refreshHistory, view,
   openConversation(next) {
     if (active && conversationId !== next.conversationId) throw new Error('busy');
     conversationId = selectedHistory = next.conversationId; peerName = next.peerName; accountChat = true; transcriptSignature = '';
-    if (!active) { validInvite = false; chatStatus(next.online ? '' : `${next.peerName} is offline. Messages wait on this device.`); }
+    if (!active) { validInvite = false; chatStatus(''); }
     refreshHistory();
   },
   closeConversation() { if (!active) { accountChat = false; conversationId = null; selectedHistory = ''; refreshHistory(); } },

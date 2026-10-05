@@ -1,11 +1,14 @@
 'use strict';
-// Passkey accounts, contacts and presence. The server introduces contacts; calls and chat
-// still run device-to-device through app.js, and message content never touches this file's requests.
+// Passkey accounts, contacts, presence and end-to-end encrypted messaging. Contact messages travel
+// as Signal-protocol envelopes (signal.js) through the server mailbox, which can never read them;
+// calls still run device-to-device through app.js.
 (() => {
   const $ = id => document.getElementById(id);
   const body = $('app'), App = window.App;
   let me = null, contacts = [], events = null, retry = 0, retryTimer, current = null, ringing = null;
-  const pairs = new Map();
+  let box = null, ready = Promise.resolve(false), inbound = Promise.resolve(), flushing = false, flushAgain = false, flushTimer;
+  let unread = {}, flagged = new Set();
+  const pairs = new Map(), mismatched = new Set();
   const clock = time => new Date(time).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   const say = (id, text) => { $(id).textContent = text; };
   const initial = name => (name || '?').slice(0, 1).toUpperCase();
@@ -16,7 +19,7 @@
     if (!response.ok) throw Object.assign(new Error(data.error || 'Something went wrong. Try again.'), { status: response.status });
     return data;
   }
-  // One stable, opaque ChatStore id per pair, so history survives across rooms.
+  // One stable, opaque ChatStore id per pair, so history survives across rooms and devices.
   async function pairId(otherId) {
     const key = [me.id, otherId].sort().join(':');
     if (!pairs.has(key)) {
@@ -53,12 +56,14 @@
   function signedIn(user) {
     me = user; body.dataset.auth = 'in'; body.dataset.screen = 'list';
     say('me-name', `@${user.username}`); say('account-status', '');
+    try { unread = JSON.parse(localStorage.getItem(`unread-v1:${me.id}`) || '{}') || {}; } catch { unread = {}; }
+    ready = setupKeys(user);
     loadContacts(); connectEvents();
   }
   function signedOut(message = '') {
-    me = null; contacts = []; current = null; pairs.clear();
-    clearTimeout(retryTimer); const previous = events; events = null; previous?.close();
-    if (App.active) App.end(); App.closeConversation();
+    me = null; contacts = []; current = null; pairs.clear(); box = null; ready = Promise.resolve(false); flagged = new Set(); mismatched.clear();
+    clearTimeout(retryTimer); clearTimeout(flushTimer); const previous = events; events = null; previous?.close();
+    if (App.active) App.end(); App.closeConversation(); $('key-banner').hidden = true;
     body.dataset.auth = 'out'; body.dataset.screen = ''; say('account-status', message);
   }
   async function signOut(everywhere) {
@@ -69,7 +74,33 @@
   $('signout').onclick = () => signOut(false);
   $('signout-all').onclick = () => signOut(true);
 
-  // ---------- Presence stream ----------
+  // ---------- Encryption keys ----------
+  async function setupKeys(user) {
+    if (!window.Signal || !await window.Signal.supported()) {
+      say('chats-status', 'This browser is too old for encrypted messaging. Update it to send and receive messages; calls still work.');
+      return false;
+    }
+    // One key store per account on this device. Private keys never leave it.
+    const store = window.Signal.indexedDbBackend(`webrtc-bun-signal-v1-${user.id}`);
+    box = window.Signal.box(store, { identityChanged: contactId => identityChanged(contactId) });
+    flagged = new Set(await store.get('flagged') || []);
+    flagged.store = store;
+    try { await publishKeys(); } catch (error) { say('chats-status', `Could not publish encryption keys: ${error.message}`); }
+    return true;
+  }
+  async function publishKeys() {
+    if (!box || !me) return;
+    const keys = await box.prekeys(), count = await api('/api/keys/count');
+    const upload = { identity: keys.identity, signedPreKey: keys.signedPreKey };
+    if (count.oneTimePreKeys < 20 || count.signedPreKeyId === null) upload.oneTimePreKeys = await box.oneTimePreKeys(100 - Math.min(count.oneTimePreKeys, 100) || 100);
+    if (upload.oneTimePreKeys || keys.rotated || count.signedPreKeyId !== keys.signedPreKey.id) await api('/api/keys', 'PUT', upload);
+  }
+  async function rememberFlag(id) {
+    flagged.add(id);
+    await flagged.store?.put('flagged', [...flagged].slice(-500));
+  }
+
+  // ---------- Presence and mailbox stream ----------
   function connectEvents() {
     if (!me || events) return;
     const socket = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/events`);
@@ -77,10 +108,15 @@
     socket.onopen = () => { retry = 0; };
     socket.onmessage = event => {
       let message; try { message = JSON.parse(event.data); } catch { return; }
-      if (message.type === 'hello') { for (const contact of contacts) contact.online = message.online.includes(contact.id); render(); }
+      if (message.type === 'hello') {
+        for (const contact of contacts) contact.online = message.online.includes(contact.id);
+        render(); ready.then(ok => { if (ok) { publishKeys().catch(() => {}); flushOutgoing(); } });
+      }
       else if (message.type === 'presence') presence(message.id, message.online);
       else if (message.type === 'contacts') loadContacts();
       else if (message.type === 'incoming') incoming(message);
+      else if (message.type === 'envelope') inbound = inbound.then(() => receiveEnvelope(socket, message)).catch(() => {});
+      else if (message.type === 'keys') checkIdentity(message.id).then(flushOutgoing).catch(() => {});
       else if (message.type === 'ended' && ringing?.roomId === message.roomId) { hideRing(); say('chats-status', `Missed call from ${ringing?.from.username ?? 'a contact'}.`); }
     };
     socket.onclose = event => {
@@ -90,16 +126,172 @@
       retryTimer = setTimeout(connectEvents, Math.min(1000 * 2 ** retry++, 15000));
     };
   }
-  async function presence(id, online) {
+  function presence(id, online) {
     const contact = contactById(id);
     if (!contact) return;
     contact.online = online; render();
-    if (!online || App.active) return;
-    // Deliver messages queued while they were away, in the background if need be.
-    const conversationId = await pairId(id);
-    const queued = (await window.ChatStore.list()).some(record => record.conversationId === conversationId && record.direction === 'outgoing' && ['queued', 'sent'].includes(record.status));
-    if (queued && (body.dataset.screen === 'list' || current?.id === id)) startChat(contact);
   }
+
+  // ---------- Receiving ----------
+  const coded = (code, text) => Object.assign(new Error(text), { code });
+  // Shape only; message content is validated by ChatStore.receive, the same rules every stored record meets.
+  function checkPayload(payload) {
+    if (!payload || payload.v !== 1 || !window.ChatStore.isMessageId(payload.id)) throw coded('invalid', 'Invalid message');
+    const size = Object.keys(payload).length;
+    if (!((payload.type === 'receipt' || payload.type === 'burn') && size === 3 || payload.type === 'message' && size === 6)) throw coded('invalid', 'Invalid message');
+  }
+  const attempts = new Map();
+  async function receiveEnvelope(socket, message) {
+    if (!await ready || !box) return; // Unacknowledged: redelivered once this device can decrypt.
+    const from = message.from, conversationId = await pairId(from.id), viewing = () => body.dataset.screen === 'conversation' && current?.id === from.id;
+    let receipt = null, burned = false, failure = null;
+    try {
+      await box.decryptFrom(from.id, message.envelope, async (payload, info) => {
+        checkPayload(payload);
+        // A new session must use the identity the server publishes for this contact, so the server's
+        // `from` label cannot attach one contact's session to another's conversation unnoticed.
+        if (info.identity) {
+          // A lookup that fails for network reasons is retried; only a real mismatch is discarded.
+          const published = await api(`/api/keys/${from.username}/identity`).then(result => result.identity, error => { throw coded(error.status === 403 ? 'mismatch' : 'storage', error.message); });
+          if (published.dh !== info.identity.dh || published.sign !== info.identity.sign) throw coded('mismatch', 'Identity mismatch');
+        }
+        try {
+          if (payload.type === 'receipt') await window.ChatStore.setStatus(conversationId, payload.id, 'delivered');
+          else if (payload.type === 'burn') { await window.ChatStore.removeConversation(conversationId); burned = true; }
+          else if (await window.ChatStore.receive(conversationId, payload) === 'stored') {
+            // Idempotent by message id: duplicates are neither shown, counted nor acknowledged twice.
+            if (info.identityChanged) await rememberFlag(payload.id.toLowerCase());
+            if (!viewing()) unread[from.id] = (unread[from.id] || 0) + 1;
+            receipt = payload.id;
+          }
+        } catch (error) { throw error.code ? error : coded('storage', error.message); }
+      });
+    } catch (error) { failure = error; }
+    const tries = (attempts.get(message.id) || 0) + 1;
+    const outcome = window.ChatStore.inboundDisposition(failure, tries);
+    if (!outcome.ack) { attempts.set(message.id, tries); say('chats-status', 'Could not save an incoming message yet. Retrying…'); return; }
+    attempts.delete(message.id);
+    if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'ack', id: message.id }));
+    const notice = {
+      'storage-full': `A message from ${from.username} was discarded: this device holds 2,000 messages. Clear some history to receive more.`,
+      invalid: `A message from ${from.username} was invalid or did not match their published security code, and was discarded.`,
+      'gave-up': `A message from ${from.username} could not be saved after several tries and was discarded.`,
+      undecryptable: `A message from ${from.username} could not be decrypted and was discarded.`,
+    }[outcome.notice];
+    if (notice) { if (viewing()) App.chatStatus(notice); else say('chats-status', notice); }
+    try { localStorage.setItem(`unread-v1:${me.id}`, JSON.stringify(unread)); } catch {}
+    if (burned) {
+      delete unread[from.id];
+      if (viewing()) App.chatStatus(`${from.username} burned this conversation. It was deleted on this device.`);
+      else say('chats-status', `${from.username} burned your conversation. It was deleted on this device.`);
+    }
+    if (viewing()) { App.refreshHistory(); updateBanner(); }
+    render();
+    if (receipt) sendControl(from, { v: 1, type: 'receipt', id: receipt }).catch(() => {});
+  }
+
+  // ---------- Sending ----------
+  const bundleFor = contact => () => api(`/api/keys/${contact.username}`);
+  async function sendControl(contact, payload) {
+    if (!box) throw new Error('Encrypted messaging is unavailable in this browser.');
+    const envelope = await box.encryptTo(contact.id, payload, bundleFor(contact));
+    await api('/api/messages', 'POST', { to: contact.username, envelope });
+  }
+  /** Encrypts and posts every queued outgoing message, oldest first, one contact at a time. */
+  async function flushOutgoing() {
+    if (!me || !await ready || !box) return;
+    if (flushing) { flushAgain = true; return; }
+    flushing = true; flushAgain = false; clearTimeout(flushTimer);
+    let retryLater = false;
+    try {
+      const records = await window.ChatStore.list();
+      for (const contact of contacts.filter(value => value.state === 'mutual')) {
+        const conversationId = await pairId(contact.id);
+        for (const record of records.filter(value => value.conversationId === conversationId && value.direction === 'outgoing' && value.status === 'queued')) {
+          try {
+            await sendControl(contact, { v: 1, type: 'message', id: record.id, text: record.text, createdAt: record.createdAt, expiresAt: record.expiresAt });
+            await window.ChatStore.setStatus(conversationId, record.id, 'sent');
+          } catch (error) {
+            if (current?.id === contact.id) App.chatStatus(error.code === 'identity-blocked' ? `${contact.username}'s security code changed. Review it to keep sending.` : error.status === 404 ? `${contact.username} has not opened the app since encryption was enabled. Messages wait on this device.` : `Not sent yet: ${error.message}`);
+            if (error.code === 'identity-blocked') updateBanner();
+            else retryLater = true;
+            break; // Keep this contact's order; try the next contact.
+          }
+        }
+      }
+    } finally {
+      flushing = false;
+      if (current) App.refreshHistory();
+      render();
+      if (flushAgain) flushOutgoing();
+      else if (retryLater) flushTimer = setTimeout(flushOutgoing, 15000);
+    }
+  }
+  App.onQueued = () => { if (current) App.chatStatus(''); flushOutgoing(); };
+  App.onBurn = async () => {
+    const contact = current && contactById(current.id);
+    if (!contact) throw new Error('Open the conversation to burn it.');
+    const conversationId = await pairId(contact.id);
+    await sendControl(contact, { v: 1, type: 'burn', id: crypto.randomUUID() });
+    await window.ChatStore.removeConversation(conversationId);
+    App.chatStatus(`Burned on this device. ${contact.username}'s device deletes its copy when the encrypted request arrives.`);
+  };
+  App.flagged = record => flagged.has(record.id.toLowerCase());
+
+  // ---------- Security codes ----------
+  async function checkIdentity(contactId) {
+    const contact = contactById(contactId);
+    if (!contact || !box) return;
+    const { identity } = await api(`/api/keys/${contact.username}/identity`);
+    await box.notePeer(contactId, identity);
+    if (current?.id === contactId) updateBanner();
+  }
+  // Cross-check a changed identity against the server's published one; a mismatch is suspicious.
+  async function identityChanged(contactId) {
+    const contact = contactById(contactId);
+    try {
+      const published = contact ? (await api(`/api/keys/${contact.username}/identity`)).identity : null;
+      const peer = await box.peer(contactId);
+      if (published && peer && (published.dh !== peer.identity.dh || published.sign !== peer.identity.sign)) mismatched.add(contactId); else mismatched.delete(contactId);
+    } catch {}
+    if (current?.id === contactId) updateBanner();
+    render();
+  }
+  async function updateBanner() {
+    const banner = $('key-banner');
+    if (!current || !box) { banner.hidden = true; return; }
+    const peer = await box.peer(current.id);
+    if (!peer || !(peer.changed || peer.blocked)) { banner.hidden = true; return; }
+    const name = current.username;
+    say('key-banner-text', mismatched.has(current.id)
+      ? `Warning: ${name}'s security code changed, and the server publishes a different one. Verify in person before trusting new messages.`
+      : peer.blocked ? `${name}'s security code changed. Sending is paused until you review it.` : `${name}'s security code changed. Compare it again to be sure no one is in the middle.`);
+    banner.hidden = false;
+  }
+  async function openSafety() {
+    $('conv-menu').open = false;
+    const contact = current && contactById(current.id);
+    if (!contact || !box) { App.chatStatus('Encrypted messaging is unavailable in this browser.'); return; }
+    try {
+      if (!await box.peer(contact.id)) await box.notePeer(contact.id, (await api(`/api/keys/${contact.username}/identity`)).identity);
+      const safety = await box.safety(me.username, contact.id, contact.username);
+      say('safety-title', `Security code with ${contact.username}`);
+      say('safety-number', safety.number);
+      say('safety-state', safety.verified ? 'Verified on this device.' : safety.changed ? 'This code changed recently. Compare it before trusting new messages.' : 'Not verified yet. Compare these 60 digits with the ones on their screen, in person or on a call. If they match, no one — not even this server — can read your messages.');
+      $('safety-verify').textContent = safety.verified ? 'Clear verification' : 'Mark as verified';
+      $('safety-accept').hidden = !safety.blocked;
+      $('safety').hidden = false; $('safety-close').focus();
+    } catch (error) { App.chatStatus(error.status === 404 ? `${contact.username} has not set up encrypted messaging yet.` : error.message); }
+  }
+  $('conv-safety').onclick = openSafety;
+  $('key-banner-review').onclick = openSafety;
+  $('safety-close').onclick = () => { $('safety').hidden = true; };
+  $('safety-verify').onclick = async () => {
+    const safety = await box.safety(me.username, current.id, current.username);
+    await box.setVerified(current.id, !safety.verified);
+    $('safety').hidden = true; updateBanner(); flushOutgoing();
+  };
+  $('safety-accept').onclick = async () => { await box.acceptChange(current.id); $('safety').hidden = true; updateBanner(); flushOutgoing(); };
 
   // ---------- Contacts and chat list ----------
   async function loadContacts() {
@@ -107,7 +299,7 @@
     try {
       const online = new Set(contacts.filter(contact => contact.online).map(contact => contact.id));
       contacts = (await api('/api/contacts')).contacts.map(contact => ({ ...contact, online: contact.online || online.has(contact.id) }));
-      render();
+      render(); flushOutgoing();
     } catch (error) { if (error.status === 401) signedOut('Your session ended. Sign in again.'); }
   }
   async function render() {
@@ -124,13 +316,16 @@
       const sub = document.createElement('small');
       text.append(name, sub); row.append(avatar, text);
       if (contact.state === 'mutual') {
-        const recent = last.get(await pairId(contact.id));
+        const recent = last.get(await pairId(contact.id)), count = unread[contact.id] || 0;
         sub.textContent = recent ? `${recent.direction === 'outgoing' ? 'You: ' : ''}${recent.text}` : contact.online ? 'Online' : 'Tap to chat';
+        const side = document.createElement('span'); side.className = 'contact-side';
         const time = document.createElement('time'); time.textContent = recent ? clock(recent.createdAt) : '';
+        side.append(time);
+        if (count) { const badge = document.createElement('span'); badge.className = 'badge'; badge.textContent = count > 99 ? '99+' : String(count); side.append(badge); row.classList.add('unread'); }
         const open = document.createElement('button'); open.type = 'button'; open.className = 'row-button';
-        open.setAttribute('aria-label', `Open conversation with ${contact.username}${contact.online ? ', online' : ''}`);
+        open.setAttribute('aria-label', `Open conversation with ${contact.username}${count ? `, ${count} unread` : ''}${contact.online ? ', online' : ''}`);
         open.onclick = () => openConversation(contact);
-        row.append(time, open);
+        row.append(side, open);
       } else if (contact.state === 'incoming') {
         sub.textContent = 'Wants to add you';
         row.append(action('Accept', 'primary', async () => { await api(`/api/contacts/${contact.username}/accept`, 'POST', {}); loadContacts(); }),
@@ -185,19 +380,10 @@
     const conversationId = await pairId(contact.id);
     if (App.active && App.conversationId !== conversationId) await App.end();
     current = contact; body.dataset.screen = 'conversation'; updateHeader();
-    if (!App.active) {
-      App.openConversation({ conversationId, peerName: contact.username, online: contact.online });
-      if (contact.online) startChat(contact);
-    }
-  }
-  async function startChat(contact) {
-    if (App.active) return;
-    try {
-      const session = await api(`/api/conversations/${contact.username}/session`, 'POST', { kind: 'chat' });
-      if (App.active) return;
-      await App.start({ ...session, kind: 'chat', conversationId: await pairId(contact.id), peerName: contact.username });
-      if (current) updateHeader();
-    } catch (error) { if (error.status !== 409) say('chats-status', error.message); }
+    delete unread[contact.id]; try { localStorage.setItem(`unread-v1:${me.id}`, JSON.stringify(unread)); } catch {}
+    if (!App.active) App.openConversation({ conversationId, peerName: contact.username, online: contact.online });
+    if (!await ready) App.chatStatus('This browser is too old for encrypted messaging. Update it to send and receive messages.');
+    updateBanner(); flushOutgoing();
   }
   async function call(kind) {
     if (!current) return;
@@ -212,8 +398,7 @@
   $('conv-voice').onclick = () => call('voice');
   $('conv-video').onclick = () => call('video');
   $('conv-back').onclick = () => {
-    body.dataset.screen = 'list';
-    // A connected chat keeps running in the background; an idle conversation just closes.
+    body.dataset.screen = 'list'; $('key-banner').hidden = true;
     if (!App.active) { App.closeConversation(); current = null; }
     render();
   };
@@ -225,22 +410,17 @@
     const contact = current;
     if (App.active) App.leave();
     await api(`/api/contacts/${contact.username}`, 'DELETE');
-    current = null; App.closeConversation(); body.dataset.screen = 'list';
+    current = null; App.closeConversation(); body.dataset.screen = 'list'; $('key-banner').hidden = true;
     say('chats-status', `Removed @${contact.username}. Messages on this device are unchanged.`);
     loadContacts();
   });
 
-  // ---------- Incoming sessions ----------
+  // ---------- Incoming calls ----------
   async function incoming(message) {
+    // Contact chats use the encrypted mailbox now; only calls ring.
+    if (message.kind === 'chat') return;
     const contact = contactById(message.from.id) || { ...message.from, state: 'mutual', online: true };
     const conversationId = await pairId(contact.id);
-    if (message.kind === 'chat') {
-      // Chat connects silently when it cannot disturb anything already on screen.
-      if (App.active || (body.dataset.screen === 'conversation' && current?.id !== contact.id)) return;
-      await App.start({ roomId: message.roomId, token: message.token, kind: 'chat', conversationId, peerName: contact.username });
-      if (current) updateHeader();
-      render(); return;
-    }
     ringing = { ...message, contact, conversationId };
     say('incoming-avatar', initial(contact.username)); say('incoming-title', contact.username);
     say('incoming-kind', message.kind === 'video' ? 'Incoming video call' : 'Incoming voice call');
@@ -251,7 +431,7 @@
     const ring = ringing; ringing = null; hideRing();
     if (!ring) return;
     if (App.active) App.leave();
-    current = ring.contact; body.dataset.screen = 'conversation'; updateHeader();
+    current = ring.contact; body.dataset.screen = 'conversation'; updateHeader(); updateBanner();
     await App.start({ roomId: ring.roomId, token: ring.token, kind: ring.kind, conversationId: ring.conversationId, peerName: ring.contact.username });
   };
   $('incoming-decline').onclick = async () => {
@@ -261,7 +441,6 @@
 
   App.onInvite = invite => { if (!me) { $('register-invite').value = invite; $('register-panel').open = true; $('register-username').focus(); } };
   App.onEnd = () => { if (me) { if (current) updateHeader(); render(); } };
-  App.onQueued = () => { if (current && contactById(current.id)?.online && !App.active) startChat(current); };
 
   // ---------- Start ----------
   (async () => {

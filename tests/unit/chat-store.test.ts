@@ -8,7 +8,7 @@ const PASSWORD = 'correct horse battery staple';
 const NOW = 1800000000000;
 const ROOM = 'r'.repeat(43);
 type Message = { id: string; conversationId: string; direction: 'incoming' | 'outgoing'; text: string; createdAt: number; status: 'queued' | 'sent' | 'delivered' | 'uncertain'; expiresAt: number | null };
-type Store = { put(message: unknown): Promise<Message>; list(): Promise<Message[]>; clear(): Promise<void>; removeConversation(conversationId: string): Promise<void>; setStatus(conversationId: string, id: string, status: string): Promise<boolean>; exportBackup(password: string): Promise<Blob>; importBackup(file: Blob, password: string): Promise<number> };
+type Store = { receive(conversationId: string, payload: unknown): Promise<string>; inboundDisposition(error: any, attempts: number): { ack: boolean; notice: string | null }; put(message: unknown): Promise<Message>; list(): Promise<Message[]>; clear(): Promise<void>; removeConversation(conversationId: string): Promise<void>; setStatus(conversationId: string, id: string, status: string): Promise<boolean>; exportBackup(password: string): Promise<Blob>; importBackup(file: Blob, password: string): Promise<number> };
 function fixture() {
   let now = NOW;
   class Clock extends Date { static override now() { return now; } }
@@ -185,4 +185,42 @@ describe('encrypted portable backups', () => {
       expect(await store.list()).toEqual([original]);
     }
   }, 15000);
+});
+
+describe('incoming mailbox messages', () => {
+  const payload = (values: Record<string, unknown> = {}) => ({ v: 1, type: 'message', id: crypto.randomUUID(), text: 'sealed hello', createdAt: NOW, expiresAt: null, ...values });
+  test('are stored once by id; a reused id with other content is a deterministic conflict', async () => {
+    const { store } = fixture();
+    const first = payload();
+    expect(await store.receive(ROOM, first)).toBe('stored');
+    expect(await store.receive(ROOM, first)).toBe('duplicate');
+    expect((await store.list()).length).toBe(1);
+    await expect(store.receive(ROOM, { ...first, text: 'different' })).rejects.toMatchObject({ code: 'conflict' });
+  });
+  test('payloads that pass a shape check but fail storage validation are rejected deterministically', async () => {
+    const { store } = fixture();
+    for (const bad of [
+      payload({ id: 'not-a-uuid' }), payload({ text: '' }), payload({ text: 'x'.repeat(4097) }), payload({ createdAt: -1 }),
+      payload({ expiresAt: NOW }), payload({ expiresAt: NOW + 31 * 86400000 }), payload({ createdAt: 1.5 }),
+    ]) await expect(store.receive(ROOM, bad)).rejects.toMatchObject({ code: 'invalid' });
+    expect(await store.receive(ROOM, payload({ createdAt: NOW - 7200000, expiresAt: NOW - 3600000 }))).toBe('expired');
+  });
+  test('a flood from one contact fills the device cap with a deterministic "full" rejection instead of a stall', async () => {
+    const { store } = fixture();
+    for (let index = 0; index < 2000; index++) expect(await store.receive(ROOM, payload())).toBe('stored');
+    await expect(store.receive(ROOM, payload())).rejects.toMatchObject({ code: 'full' });
+    expect(store.inboundDisposition({ code: 'full' }, 1)).toEqual({ ack: true, notice: 'storage-full' });
+  });
+  test('fails closed: only known permanent outcomes are acknowledged at once; everything else is retried up to three times', () => {
+    const { store } = fixture();
+    expect(store.inboundDisposition(null, 1)).toEqual({ ack: true, notice: null });
+    expect(store.inboundDisposition({ code: 'replay' }, 1)).toEqual({ ack: true, notice: null });
+    for (const code of ['invalid', 'conflict', 'mismatch']) expect(store.inboundDisposition({ code }, 1)).toEqual({ ack: true, notice: 'invalid' });
+    for (const code of ['auth', 'malformed', 'skip-limit', 'unknown-session', 'unknown-spk', 'claim-limit']) expect(store.inboundDisposition({ code }, 1)).toEqual({ ack: true, notice: 'undecryptable' });
+    for (const error of [{ code: 'storage' }, new Error('IndexedDB hiccup'), { code: 'something-new' }, 'thrown string']) {
+      expect(store.inboundDisposition(error, 1)).toEqual({ ack: false, notice: 'retrying' });
+      expect(store.inboundDisposition(error, 2)).toEqual({ ack: false, notice: 'retrying' });
+      expect(store.inboundDisposition(error, 3)).toEqual({ ack: true, notice: 'gave-up' });
+    }
+  });
 });

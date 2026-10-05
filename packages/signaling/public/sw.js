@@ -1,6 +1,6 @@
 'use strict';
 const CACHE = 'private-conversations-shell-v4';
-const ASSETS = ['/', '/app.js', '/account.js', '/vendor/simplewebauthn-browser.js', '/chat-store.js', '/verify.js', '/style.css', '/install.js', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'];
+const ASSETS = ['/', '/app.js', '/account.js', '/vendor/simplewebauthn-browser.js', '/chat-store.js', '/signal.js', '/verify.js', '/style.css', '/install.js', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS)));
   // Do not take over an active call. New code activates after old tabs close.

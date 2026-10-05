@@ -88,6 +88,42 @@
       return { writes: [next], result: next };
     });
   }
+  const coded = (code, text) => Object.assign(new Error(text), { code });
+  /**
+   * Stores one decrypted incoming message, idempotent by id, using the same validation as every stored
+   * record. Deterministic rejections carry a code so the caller acknowledges and discards the envelope
+   * instead of retrying forever: 'invalid', 'conflict' (an id reused with other content) and 'full'
+   * (the 2,000-message device cap; incoming messages are discarded with a notice rather than silently
+   * evicting history). Resolves to 'stored', 'duplicate' or 'expired'.
+   */
+  async function receive(conversationId, payload) {
+    let message;
+    try { message = validate({ id: payload?.id, conversationId, direction: 'incoming', text: payload?.text, createdAt: payload?.createdAt, status: 'delivered', expiresAt: payload?.expiresAt }); }
+    catch { throw coded('invalid', 'Invalid incoming message.'); }
+    if (expired(message)) return 'expired';
+    return transaction((active, now) => {
+      if (expired(message, now)) return { result: 'expired' };
+      const previous = active.get(key(message));
+      if (previous) {
+        if (FIELDS.some(field => field !== 'status' && previous[field] !== message[field])) throw coded('conflict', 'A message identifier was reused with different content.');
+        return { result: 'duplicate' };
+      }
+      if (active.size >= MAX_MESSAGES) throw coded('full', 'This device holds 2,000 messages. Clear chat history to receive more.');
+      return { writes: [message], result: 'stored' };
+    });
+  }
+  /**
+   * What to do with a mailbox envelope after trying to process it: acknowledge (the server deletes it)
+   * or leave it for redelivery. Fails closed: only known permanent outcomes are acknowledged at once.
+   * Storage errors and anything uncoded or unknown are retried, and acknowledged with a notice only
+   * after `limit` attempts. Every discard except a true replay is reported.
+   */
+  const PERMANENT = { replay: null, full: 'storage-full', invalid: 'invalid', conflict: 'invalid', mismatch: 'invalid', malformed: 'undecryptable', auth: 'undecryptable', 'skip-limit': 'undecryptable', 'unknown-session': 'undecryptable', 'unknown-spk': 'undecryptable', 'claim-limit': 'undecryptable' };
+  function inboundDisposition(error, attempts, limit = 3) {
+    if (!error) return { ack: true, notice: null };
+    if (typeof error.code === 'string' && Object.hasOwn(PERMANENT, error.code)) return { ack: true, notice: PERMANENT[error.code] };
+    return attempts >= limit ? { ack: true, notice: 'gave-up' } : { ack: false, notice: 'retrying' };
+  }
   const list = () => transaction(active => ({ result: sorted([...active.values()]) }));
   async function setStatus(conversationId, id, status) {
     if (typeof conversationId !== 'string' || !ROOM.test(conversationId) || typeof id !== 'string' || !UUID.test(id) ||
@@ -199,5 +235,5 @@
       return { writes: [...writes.values()], result: count };
     });
   }
-  window.ChatStore = Object.freeze({ put, list, clear, removeConversation, setStatus, exportBackup, importBackup });
+  window.ChatStore = Object.freeze({ put, list, clear, removeConversation, setStatus, exportBackup, importBackup, receive, inboundDisposition, isMessageId: id => typeof id === 'string' && UUID.test(id) });
 })();
