@@ -6,6 +6,7 @@ import type { ServerWebSocket } from 'bun';
 import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from '@simplewebauthn/server';
 import { packetBudget } from '../stun-server/native/server';
 import { requestLimiter } from './rate-limit';
+import type { Push } from './push';
 
 // Accounts identify people and introduce them; message content never reaches this module.
 // The server learns usernames, the contact graph, presence and passkey public keys.
@@ -19,6 +20,8 @@ export type Calls = {
     endPair(users: string[]): void;
     /** Rooms where the peer waits for this user, with a fresh credential for each. */
     waitingFor(userId: string): { roomId: string; peerId: string; kind: string; token: string }[];
+    /** Whether a live pair room is waiting for this user to join. */
+    ringingFor?(userId: string, roomId: string): boolean;
 };
 const DAY = 86400000, INVITE_LIFETIME = 7 * DAY, SESSION_LIFETIME = 30 * DAY, FLOW_LIFETIME = 5 * 60000, REQUEST_LIFETIME = 30 * DAY, MAX_PENDING_REQUESTS = 20;
 const USERNAME = /^[a-z0-9_]{3,20}$/, INVITE = /^[A-Za-z0-9_-]{22}$/, FLOW = /^[A-Za-z0-9_-]{22}$/;
@@ -56,8 +59,12 @@ export function createInvite(db: Database, createdBy: string | null, now = Date.
     return { code, expiresAt: now + INVITE_LIFETIME };
 }
 
-export function createAccounts(options: { db: Database; origin: string; now: () => number; calls: Calls }) {
-    const { db, now, calls } = options;
+export function createAccounts(options: { db: Database; origin: string; now: () => number; calls: Calls; push?: Push; ringAckMs?: number }) {
+    const { db, now, calls, push } = options;
+    // Calls announced by push, so an unanswered one can become a missed-call notification.
+    const pushedCalls = new Map<string, { callee: string; from: string; kind: 'voice' | 'video' }>();
+    // Calls waiting for the callee's app to confirm it is ringing on screen.
+    const ringAcks = new Map<string, ReturnType<typeof setTimeout>>();
     const origin = new URL(options.origin), rpID = origin.hostname, secure = origin.protocol === 'https:';
     const cookieName = secure ? '__Host-session' : 'session';
     const flows = new Map<string, { kind: 'register' | 'login'; challenge: string; expiresAt: number; source: string; invite?: string; username?: string; userId?: string }>();
@@ -144,6 +151,14 @@ export function createAccounts(options: { db: Database; origin: string; now: () 
         notify(a.id, { type: 'presence', id: b.id, online: online(b.id) }); notify(b.id, { type: 'presence', id: a.id, online: online(a.id) });
     }
 
+    /** Wakes the callee's devices unless an open app confirms the call is ringing on screen. */
+    function ringOrPush(callee: string, from: string, kind: 'voice' | 'video', roomId: string) {
+        if (!push) return;
+        const wake = () => { ringAcks.delete(roomId); pushedCalls.set(roomId, { callee, from, kind }); push.notify(callee, { type: 'call', from, kind, roomId }).catch(() => {}); };
+        if (!online(callee)) { wake(); return; }
+        clearTimeout(ringAcks.get(roomId));
+        ringAcks.set(roomId, setTimeout(wake, options.ringAckMs ?? 4000));
+    }
     async function handle(request: Request, url: URL, server: { upgrade(request: Request, options: { data: EventsConnection }): boolean }, source: string): Promise<Response | undefined> {
         const requestOrigin = request.headers.get('origin');
         if (url.pathname === '/api/events' && request.method === 'GET') {
@@ -221,13 +236,22 @@ export function createAccounts(options: { db: Database; origin: string; now: () 
             return json({ user }, 200, { 'Set-Cookie': startSession(user.id) });
         }
 
+        if (path === '/api/push/key' && request.method === 'GET') return push ? json({ publicKey: push.publicKey }) : json({ error: 'Notifications are not configured.' }, 404);
         const user = sessionUser(request);
         if (!user) return json({ error: 'Unauthorized' }, 401);
+        if (path === '/api/push/subscribe' && push && request.method === 'POST') {
+            return push.subscribe(user.id, user.session, (await readBody(request))?.subscription) ? json({ status: 'subscribed' }, 201) : json({ error: 'Unsupported push subscription.' }, 400);
+        }
+        if (path === '/api/push/subscribe' && push && request.method === 'DELETE') {
+            push.unsubscribe(user.id, (await readBody(request))?.endpoint);
+            return json({ status: 'unsubscribed' });
+        }
         if (path === '/api/me' && request.method === 'GET') return json({ user: { id: user.id, username: user.username } });
         if (path === '/api/logout' && request.method === 'POST') {
             // ?all=1 signs out every device of this account.
             if (url.searchParams.get('all') === '1') db.query('DELETE FROM sessions WHERE user_id = ?').run(user.id);
             else db.query('DELETE FROM sessions WHERE token_hash = ?').run(user.session);
+            if (url.searchParams.get('all') === '1') push?.forgetUser(user.id); else push?.forgetSession(user.session);
             closeDeadStreams(user.id);
             return json({ status: 'signed-out' }, 200, { 'Set-Cookie': `${cookieName}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure ? '; Secure' : ''}` });
         }
@@ -293,6 +317,7 @@ export function createAccounts(options: { db: Database; origin: string; now: () 
             if (room === 'full') return json({ error: 'Room capacity reached' }, 503);
             // Only the peer's own authenticated event stream receives its credential.
             if (room.peerToken) notify(target.id, { type: 'incoming', from: { id: user.id, username: user.username }, kind, roomId: room.roomId, token: room.peerToken });
+            if (room.peerToken && kind !== 'chat') ringOrPush(target.id, user.username, kind, room.roomId);
             return json({ roomId: room.roomId, token: room.token, online: online(target.id) });
         }
         return json({ error: 'Not found' }, 404);
@@ -300,11 +325,25 @@ export function createAccounts(options: { db: Database; origin: string; now: () 
 
     return {
         handle, notify, sessionUser, online,
-        roomEnded(users: string[], roomId: string) { for (const id of users) notify(id, { type: 'ended', roomId }); },
+        roomEnded(users: string[], roomId: string, code = 1000) {
+            for (const id of users) notify(id, { type: 'ended', roomId });
+            clearTimeout(ringAcks.get(roomId)); ringAcks.delete(roomId);
+            const pushed = pushedCalls.get(roomId); pushedCalls.delete(roomId);
+            // An open app hears 'ended' above; a closed one swaps its ringing notification for a missed call.
+            // Replaced (4001) or declined (4002) calls are not missed.
+            if (pushed && code === 1000 && !online(pushed.callee)) push?.notify(pushed.callee, { type: 'missed', from: pushed.from, kind: pushed.kind }).catch(() => {});
+        },
+        /** Integration point for offline delivery: notifies a recipient whose app is closed. */
+        pushNotify(userId: string, event: { type: 'message'; from: string } | { type: 'call'; from: string; kind: 'voice' | 'video'; roomId: string }) {
+            if (!push || (event.type === 'message' && online(userId))) return Promise.resolve(0);
+            if (event.type === 'call') pushedCalls.set(event.roomId, { callee: userId, from: event.from, kind: event.kind });
+            return push.notify(userId, event).catch(() => 0);
+        },
         sweep() {
             db.query('DELETE FROM sessions WHERE expires_at <= ?').run(now());
             for (const [id, value] of flows) if (value.expiresAt <= now()) flows.delete(id);
             closeDeadStreams();
+            push?.sweep();
         },
         events: {
             open(socket: ServerWebSocket<EventsConnection>) {
@@ -320,10 +359,15 @@ export function createAccounts(options: { db: Database; origin: string; now: () 
                     if (from && mutual(userId, from.id)) socket.send(JSON.stringify({ type: 'incoming', from, kind: waiting.kind, roomId: waiting.roomId, token: waiting.token }));
                 }
             },
-            message(socket: ServerWebSocket<EventsConnection>) {
-                // The stream is server-to-client only; clients have nothing to say on it.
-                if (!socket.data.allow()) socket.close(1008, 'Rate limited');
-                else if (!sessionLive(socket.data.session)) socket.close(4401, 'Signed out');
+            message(socket: ServerWebSocket<EventsConnection>, raw?: string | Buffer) {
+                // Clients only confirm that an incoming call is ringing on a visible screen.
+                if (!socket.data.allow()) { socket.close(1008, 'Rate limited'); return; }
+                if (!sessionLive(socket.data.session)) { socket.close(4401, 'Signed out'); return; }
+                let message: any;
+                try { message = typeof raw === 'string' && raw.length <= 256 ? JSON.parse(raw) : null; } catch { return; }
+                if (message?.type === 'ringing' && typeof message.roomId === 'string' && calls.ringingFor?.(socket.data.userId, message.roomId)) {
+                    clearTimeout(ringAcks.get(message.roomId)); ringAcks.delete(message.roomId);
+                }
             },
             close(socket: ServerWebSocket<EventsConnection>) {
                 const set = listeners.get(socket.data.userId);

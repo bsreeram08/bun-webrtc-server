@@ -100,6 +100,13 @@ describe('self-hosted signaling over real HTTP and WebSocket sockets', () => {
         expect((await instance.request('/health', { headers: sourceA })).status).toBe(200);
         expect((await instance.request('/rooms', { method: 'POST', headers: { 'X-Real-IP': '192.0.2.2', Authorization: `Bearer ${adminToken}` } })).status).toBe(201);
     });
+    test('loading the app shell does not spend the API request budget', async () => {
+        const instance = app({ trustProxy: true });
+        const headers = { 'X-Real-IP': '192.0.2.9' };
+        const shell = await Promise.all(Array.from({ length: 80 }, () => instance.request('/app.js', { headers }).then(response => response.status)));
+        expect(shell.every(status => status === 200)).toBe(true);
+        expect((await instance.request('/rooms', { method: 'POST', headers: { ...headers, Authorization: `Bearer ${adminToken}` } })).status).toBe(201);
+    });
     test('untrusted forwarded headers cannot bypass real HTTP source limits', async () => {
         const instance = app();
         const statuses = await Promise.all(Array.from({ length: 80 }, async (_, i) => {
