@@ -5,6 +5,9 @@
   const $ = id => document.getElementById(id);
   const body = $('app'), App = window.App;
   let me = null, contacts = [], events = null, retry = 0, retryTimer, current = null, ringing = null;
+  let missTimer, noAnswerTimer;
+  const Ring = window.Ring || { incoming() {}, outgoing() {}, stop() {}, unlock() {} };
+  const RING_TIMEOUT = 45000, USERNAME = /^[a-z0-9_]{3,20}$/;
   const pairs = new Map();
   const clock = time => new Date(time).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   const say = (id, text) => { $(id).textContent = text; };
@@ -53,13 +56,14 @@
   function signedIn(user) {
     me = user; body.dataset.auth = 'in'; body.dataset.screen = 'list';
     say('me-name', `@${user.username}`); say('account-status', '');
-    loadContacts(); connectEvents();
+    loadContacts(); connectEvents(); window.Alerts?.signedIn();
   }
   function signedOut(message = '') {
     me = null; contacts = []; current = null; pairs.clear();
     clearTimeout(retryTimer); const previous = events; events = null; previous?.close();
     if (App.active) App.end(); App.closeConversation();
     body.dataset.auth = 'out'; body.dataset.screen = ''; say('account-status', message);
+    hideRing(); stopCalling(); window.Alerts?.signedOut();
   }
   async function signOut(everywhere) {
     $('account-menu').open = false;
@@ -81,7 +85,7 @@
       else if (message.type === 'presence') presence(message.id, message.online);
       else if (message.type === 'contacts') loadContacts();
       else if (message.type === 'incoming') incoming(message);
-      else if (message.type === 'ended' && ringing?.roomId === message.roomId) { hideRing(); say('chats-status', `Missed call from ${ringing?.from.username ?? 'a contact'}.`); }
+      else if (message.type === 'ended' && ringing?.roomId === message.roomId) { const ring = ringing; ringing = null; hideRing(); say('chats-status', `Missed ${ring.kind} call from ${ring.contact.username} · ${clock(Date.now())}`); }
     };
     socket.onclose = event => {
       if (events !== socket) return;
@@ -107,7 +111,7 @@
     try {
       const online = new Set(contacts.filter(contact => contact.online).map(contact => contact.id));
       contacts = (await api('/api/contacts')).contacts.map(contact => ({ ...contact, online: contact.online || online.has(contact.id) }));
-      render();
+      render(); openPending();
     } catch (error) { if (error.status === 401) signedOut('Your session ended. Sign in again.'); }
   }
   async function render() {
@@ -190,6 +194,21 @@
       if (contact.online) startChat(contact);
     }
   }
+  /** Notification taps only choose which conversation to show. They never start or answer a call:
+   *  an incoming call keeps ringing on its sheet until the user taps Accept in the app. */
+  async function openPending() {
+    const pending = window.pendingOpen;
+    if (!pending || !me) return;
+    window.pendingOpen = null;
+    const contact = USERNAME.test(pending.user || '') && contacts.find(value => value.username === pending.user && value.state === 'mutual');
+    if (!contact || App.active) return;
+    if (!pending.call) { openConversation(contact); return; }
+    // A call notification must not start chat here: that would take over the waiting call's room.
+    current = contact; body.dataset.screen = 'conversation'; updateHeader();
+    App.openConversation({ conversationId: await pairId(contact.id), peerName: contact.username, online: contact.online });
+  }
+  if (window.Alerts) window.Alerts.onOpen = data => { window.pendingOpen = { user: data.user, call: Boolean(data.call) }; openPending(); };
+  function stopCalling() { clearTimeout(noAnswerTimer); noAnswerTimer = undefined; Ring.stop(); }
   async function startChat(contact) {
     if (App.active) return;
     try {
@@ -204,10 +223,20 @@
     const contact = current;
     try {
       const conversationId = await pairId(contact.id);
+      Ring.unlock(); // This click is the gesture that lets the ringback play.
       if (App.active) App.leave();
       const session = await api(`/api/conversations/${contact.username}/session`, 'POST', { kind });
       await App.start({ ...session, kind, conversationId, peerName: contact.username });
-    } catch (error) { App.status(error.message); }
+      if (!App.active) return;
+      Ring.outgoing();
+      clearTimeout(noAnswerTimer);
+      noAnswerTimer = setTimeout(async () => {
+        noAnswerTimer = undefined; Ring.stop();
+        if (App.roomId !== session.roomId) return;
+        await App.end();
+        App.status(`No answer from ${contact.username}.`); say('chats-status', `No answer from ${contact.username} · ${clock(Date.now())}`);
+      }, RING_TIMEOUT);
+    } catch (error) { stopCalling(); App.status(error.message); }
   }
   $('conv-voice').onclick = () => call('voice');
   $('conv-video').onclick = () => call('video');
@@ -245,9 +274,22 @@
     say('incoming-avatar', initial(contact.username)); say('incoming-title', contact.username);
     say('incoming-kind', message.kind === 'video' ? 'Incoming video call' : 'Incoming voice call');
     $('incoming').hidden = false; $('incoming-accept').focus();
+    Ring.incoming(); acknowledgeRinging();
+    clearTimeout(missTimer);
+    missTimer = setTimeout(() => {
+      if (ringing?.roomId !== message.roomId) return;
+      ringing = null; hideRing();
+      say('chats-status', `Missed ${message.kind} call from ${contact.username} · ${clock(Date.now())}`);
+    }, RING_TIMEOUT);
   }
-  function hideRing() { $('incoming').hidden = true; }
+  // Tells the server this call is ringing on a visible screen, so it need not wake the phone by push.
+  function acknowledgeRinging() {
+    if (ringing && document.visibilityState === 'visible' && events?.readyState === WebSocket.OPEN) events.send(JSON.stringify({ type: 'ringing', roomId: ringing.roomId }));
+  }
+  document.addEventListener('visibilitychange', acknowledgeRinging);
+  function hideRing() { $('incoming').hidden = true; clearTimeout(missTimer); missTimer = undefined; Ring.stop(); }
   $('incoming-accept').onclick = async () => {
+    Ring.unlock();
     const ring = ringing; ringing = null; hideRing();
     if (!ring) return;
     if (App.active) App.leave();
@@ -260,7 +302,8 @@
   };
 
   App.onInvite = invite => { if (!me) { $('register-invite').value = invite; $('register-panel').open = true; $('register-username').focus(); } };
-  App.onEnd = () => { if (me) { if (current) updateHeader(); render(); } };
+  App.onEnd = () => { stopCalling(); if (me) { if (current) updateHeader(); render(); } };
+  App.onPeerJoined = () => stopCalling();
   App.onQueued = () => { if (current && contactById(current.id)?.online && !App.active) startChat(current); };
 
   // ---------- Start ----------

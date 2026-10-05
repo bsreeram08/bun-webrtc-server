@@ -305,7 +305,7 @@ async function receive(message) {
     token = message.token; polite = message.polite; reconnectSince = 0; reconnectAttempt = 0; return;
   }
   if (message.type === 'ready') {
-    closePeer(); sessionId = message.sessionId; ready = true; createPeer();
+    closePeer(); sessionId = message.sessionId; ready = true; createPeer(); window.App?.onPeerJoined?.();
     status(`Connecting to ${peerName}…`); return;
   }
   if (message.type === 'peer-left') { closePeer(); status(`${peerName[0].toUpperCase() + peerName.slice(1)} disconnected. Waiting for them to return…`); return; }
@@ -566,6 +566,9 @@ else {
   const hash = new URLSearchParams(new URL(incoming).hash.slice(1));
   // Account invitations (#invite=…) belong to the sign-up screen, not the call flow.
   if (hash.has('invite')) { window.pendingAccountInvite = hash.get('invite'); status('Create your account with this invitation.'); }
+  // Notification taps open a contact's conversation (#open=username); account.js picks it up after sign-in.
+  // It only selects a conversation: nothing in a URL may start or answer a call or capture media.
+  else if (hash.has('open')) window.pendingOpen = { user: hash.get('open'), call: hash.has('call') };
   else if (new URL(incoming).hash) { try { openInvitation(incoming); } catch (error) { status(error.message); $('invitation-panel').open = true; } }
   else { status('Open your invitation link to connect. Saved messages stay below.'); $('status').classList?.add('idle'); $('invitation-panel').open = true; }
 }

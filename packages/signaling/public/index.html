@@ -8,6 +8,7 @@
   <script src="/verify.js" defer></script>
   <script src="/vendor/simplewebauthn-browser.js" defer></script>
   <script src="/app.js" defer></script>
+  <script src="/alerts.js" defer></script>
   <script src="/account.js" defer></script>
   <script src="/install.js" defer></script>
 </head>
@@ -74,6 +75,11 @@
       <label for="invite-link">Invitation link</label>
       <div class="invite-row"><input id="invite-link" readonly><button id="invite-copy" type="button">Copy</button></div>
       <p id="invite-expiry" class="note"></p><button id="invite-close" class="link" type="button">Done</button>
+    </div>
+    <div id="notify-banner" class="notify-banner" hidden>
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+      <p id="notify-banner-text">Get notified about messages and calls, even when this app is closed.</p>
+      <div class="notify-actions"><button id="notify-enable" class="primary" type="button">Turn on</button><button id="notify-dismiss" class="link" type="button">Not now</button></div>
     </div>
     <p id="chats-status" role="status" aria-live="polite"></p>
     <ul id="contact-list" aria-label="Chats"></ul>
@@ -146,6 +152,12 @@
 
   <details id="settings" class="card settings backup-section"><summary>Settings</summary>
     <button id="settings-close" class="icon-button session-only" type="button" aria-label="Close settings"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+    <div class="account-only">
+      <h3>Notifications and sounds</h3>
+      <label class="toggle"><input id="notify-toggle" type="checkbox"> Notify me about messages and calls on this device</label>
+      <label class="toggle"><input id="ring-silent" type="checkbox"> Silent: no ringtone or vibration</label>
+      <p id="notify-status" class="note" role="status" aria-live="polite"></p>
+    </div>
     <h3>Encrypted backup</h3>
     <p>Download an encrypted copy of your messages, keep it in Google Drive or anywhere you like, and restore it on another phone with the same password.</p>
     <label for="backup-password">Backup password</label><input id="backup-password" type="password" autocomplete="off" minlength="12" placeholder="At least 12 characters">
