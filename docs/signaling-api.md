@@ -22,6 +22,27 @@ deletion endpoints. Invalid/expired credentials return 401, foreign origins 403,
 source limits 429, and room capacity exhaustion 503. Deleting an already ended
 room returns 401 because its credentials no longer exist.
 
+### Account API (when `DATA_DIR` accounts are enabled)
+
+Cookie-authenticated JSON endpoints under `/api`. Every non-GET request needs this app's `Origin`.
+
+| Method and path | Result |
+| --- | --- |
+| `POST /api/register/options` `{ invite, username }` | Passkey creation options and a single-use `flowId`. 400 for a bad/used/expired invite or username, 409 if taken. |
+| `POST /api/register/verify` `{ flowId, response }` | Creates the account, consumes the invite, sets the session cookie. |
+| `POST /api/login/options` | Usernameless passkey request options and a `flowId`. |
+| `POST /api/login/verify` `{ flowId, response }` | Sets a fresh session cookie. Failures are always `Sign-in failed.` |
+| `GET /api/me` · `POST /api/logout[?all=1]` | Current user; sign out this session (or every session). |
+| `POST /api/invites` | A new single-use invite `{ code, expiresAt }`, shown once. At most 20 unused per account. |
+| `GET /api/contacts` | Mutual contacts (with `online`), incoming requests, and outgoing requests (by typed username, `id: null`). |
+| `POST /api/contacts` `{ username }` | Always `202 { status: "requested" }` for any well-formed username; accepts if they already asked you. |
+| `POST /api/contacts/:username/accept` · `DELETE /api/contacts/:username` | Accept a request; remove a contact or cancel/decline a request (also ends any live room). |
+| `POST /api/conversations/:username/session` `{ kind: "chat" \| "voice" \| "video" }` | Mutual contacts only. Returns `{ roomId, token, online }` for the caller's own slot. Calls always replace the pair's room; chat reuses a live one. 409 if already connected. |
+| `POST /api/conversations/:username/decline` `{ roomId }` | Ends a ringing call; the caller's socket closes with code 4002. |
+| `GET /api/events` (WebSocket) | Server-to-client stream: `hello` (online contacts), `presence`, `contacts` (refetch), `incoming` `{ from, kind, roomId, token }`, `ended`. Closes with 4401 when the session ends. |
+
+Room sockets for contact rooms close with 4001 when a newer call replaces the room and 4002 when the call is declined.
+
 The default lifetime is one hour, and state is memory-only. Server restart ends
 all rooms. Each invitation grants one participant slot; it is not proof of human
 identity. The operator's `scripts/create-room.ts` command produces two browser

@@ -28,7 +28,23 @@ Create participant invitations from the trusted server:
 docker compose --env-file deploy/.env exec signaling bun --no-env-file scripts/create-room.ts
 ```
 
-Privately share the two distinct participant links. The administrator token stays on the server. Treat invite links as passwords. The browser must receive microphone/camera permission. Use two physical devices on different networks to test both audio and video. For relay verification add `RELAY_ONLY=true` to `deploy/.env`, recreate signaling, and confirm the selected ICE pair uses `relay` candidates in browser WebRTC diagnostics. A passing HTTP health check alone does not verify calls.
+Privately share the two distinct participant links. The administrator token stays on the server.
+
+### Accounts (passkeys and contacts)
+
+Accounts are on by default. The signaling service keeps an SQLite database in `DATA_DIR` (Compose: the `signaling_data` volume at `/data`; elsewhere `./data` relative to the working directory). It is created with owner-only permissions (directory `0700`, file `0600`). Set `ACCOUNTS=off` to run invitation links only. Passkeys are bound to the hostname of `PUBLIC_ORIGIN`; changing the domain later invalidates every registered passkey.
+
+Sign-up needs a single-use invite code (valid seven days). Create the first one on the server, then open the printed link and register with a passkey:
+
+```sh
+docker compose --env-file deploy/.env exec -e PUBLIC_ORIGIN=https://calls.example.com signaling bun --no-env-file scripts/create-invite.ts
+```
+
+Signed-in people create further invites from the app (⋯ → Invite someone). After that, contacts call and message each other from the app without anyone running `create-room.ts`.
+
+Back up the account database together with `deploy/.env`: stop signaling or use SQLite's online backup (`sqlite3 accounts.sqlite ".backup accounts-backup.sqlite"`), and keep the copy private. It holds usernames, the contact graph, session hashes and passkey public keys — no messages and no private keys — but it is still sensitive metadata. Losing it means everyone re-registers with new invites; message history on devices is unaffected.
+
+The only third-party runtime dependency is the passkey verifier `@simplewebauthn/server`, pinned exactly in `packages/signaling/package.json` with its full dependency tree locked in `packages/signaling/bun.lock`. The image installs it with `bun install --production --frozen-lockfile`, which fails instead of resolving different versions. Install the same way on any non-Docker host, from inside `packages/signaling` with no parent `package.json` workspace above it, and never with `--no-save` or without the lockfile. Review lockfile diffs when updating. Treat invite links as passwords. The browser must receive microphone/camera permission. Use two physical devices on different networks to test both audio and video. For relay verification add `RELAY_ONLY=true` to `deploy/.env`, recreate signaling, and confirm the selected ICE pair uses `relay` candidates in browser WebRTC diagnostics. A passing HTTP health check alone does not verify calls.
 
 ## Operation and security boundaries
 
