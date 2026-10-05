@@ -107,7 +107,7 @@ describe('encrypted mailbox', () => {
         const alice = user('alice'), bob = user('bob');
         await befriend(alice, bob);
         const pushes: any[] = [];
-        app.accounts!.pushNotify = (userId, event) => { pushes.push([userId, event]); };
+        app.accounts!.pushNotify = async (userId, event) => { pushes.push([userId, event]); return 1; };
         const ids: string[] = [];
         for (let index = 0; index < 5; index++) { ids.push(((await (await request('/api/messages', 'POST', alice.cookie, { to: 'bob', envelope: envelope() })).json()) as any).id); await Bun.sleep(2); }
         expect(pushes).toHaveLength(5);

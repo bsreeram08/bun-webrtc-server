@@ -4,6 +4,7 @@ import { packetBudget } from '../stun-server/native/server';
 import { requestLimiter, requestSource } from './rate-limit';
 import { validateTurnUrl } from './config';
 import { createAccounts, openDatabase, type Accounts, type EventsConnection } from './accounts';
+import { createPush, type PushSend } from './push';
 
 type Participant = { digest: string; socket?: ServerWebSocket<Connection> };
 type Room = { id: string; expiresAt: number; participants: Participant[]; sessionId?: string; pair?: string[]; kind?: string };
@@ -28,6 +29,10 @@ export type SignalingOptions = {
     trustProxy?: boolean;
     /** Enables passkey accounts, contacts and presence, stored in DATA_DIR. */
     dataDir?: string;
+    /** Test hook replacing the Web Push sender. */
+    pushSend?: PushSend;
+    /** How long an online callee's app has to confirm it is ringing before devices get a push. */
+    ringAckMs?: number;
 };
 
 export function startSignaling(options: SignalingOptions) {
@@ -55,7 +60,7 @@ export function startSignaling(options: SignalingOptions) {
         for (const participant of room.participants) participant.socket?.close(code, reason);
         if (room.pair) {
             if (pairRooms.get(room.pair.join(':')) === room) pairRooms.delete(room.pair.join(':'));
-            accounts?.roomEnded(room.pair, room.id);
+            accounts?.roomEnded(room.pair, room.id, code);
         }
     }
     function sweep() {
@@ -64,7 +69,9 @@ export function startSignaling(options: SignalingOptions) {
     }
     function issue(participant: Participant) { const next = token(); participant.digest = digest(next); return next; }
     let accounts: Accounts | undefined;
-    if (options.dataDir) accounts = createAccounts({ db: openDatabase(options.dataDir), origin: options.origin, now, calls: {
+    const db = options.dataDir ? openDatabase(options.dataDir) : undefined;
+    const push = db && options.dataDir ? createPush({ db, dataDir: options.dataDir, origin: options.origin, send: options.pushSend, now }) : undefined;
+    if (db) accounts = createAccounts({ db, origin: options.origin, now, push, ringAckMs: options.ringAckMs, calls: {
         pairRoom(users, requester, kind) {
             let room = pairRooms.get(users.join(':'));
             // A call always gets a fresh room; a chat reuses the live one.
@@ -85,6 +92,10 @@ export function startSignaling(options: SignalingOptions) {
             remove(room, 4002, 'Call declined'); return true;
         },
         endPair(users) { const room = pairRooms.get(users.join(':')); if (room) remove(room); },
+        ringingFor(userId, roomId) {
+            const room = rooms.get(roomId), index = room?.pair?.indexOf(userId) ?? -1;
+            return Boolean(room && index >= 0 && !room.participants[index]!.socket && room.expiresAt > now());
+        },
         waitingFor(userId) {
             const waiting = [];
             for (const room of pairRooms.values()) {
@@ -102,10 +113,9 @@ export function startSignaling(options: SignalingOptions) {
             const url = new URL(request.url);
             if (request.method === 'GET' && url.pathname === '/health') return json({ status: 'ok' });
             const source = requestSource(server.requestIP(request)?.address, request.headers, options.trustProxy);
-            if (!allowRequest(source)) return json({ error: 'Rate limited' }, 429);
             const requestOrigin = request.headers.get('origin');
             if (requestOrigin && requestOrigin !== options.origin) return json({ error: 'Origin denied' }, 403);
-            if (request.method === 'GET' && ['/', '/app.js', '/account.js', '/chat-store.js', '/signal.js', '/verify.js', '/vendor/simplewebauthn-browser.js', '/style.css', '/install.js', '/sw.js', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'].includes(url.pathname)) {
+            if (request.method === 'GET' && ['/', '/app.js', '/account.js', '/alerts.js', '/chat-store.js', '/signal.js', '/verify.js', '/vendor/simplewebauthn-browser.js', '/style.css', '/install.js', '/sw.js', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'].includes(url.pathname)) {
                 const path = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
                 return new Response(Bun.file(new URL(`./public/${path}`, import.meta.url)), { headers: {
                     'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; media-src 'self' blob:; img-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
@@ -113,6 +123,9 @@ export function startSignaling(options: SignalingOptions) {
                     'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store',
                 } });
             }
+            // Fixed public files are not rate limited: two phones loading the app behind one home
+            // router would otherwise spend the shared per-IP budget before their first API call.
+            if (!allowRequest(source)) return json({ error: 'Rate limited' }, 429);
             if (url.pathname.startsWith('/api/')) return accounts ? accounts.handle(request, url, server, source) : json({ error: 'Not found' }, 404);
             const roomMatch = /^\/rooms\/([A-Za-z0-9_-]{43})(\/ice)?$/.exec(url.pathname);
             if (roomMatch && (roomMatch[2] && request.method === 'GET' || !roomMatch[2] && request.method === 'DELETE')) {

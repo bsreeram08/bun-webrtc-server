@@ -297,7 +297,7 @@ function createPeer() {
     window.Verify.attach(peer, peer.createDataChannel('verify-v1', { negotiated: true, id: 1000, ordered: true }), result => {
       if (pc !== peer) return;
       verified = Boolean(result.code); clearTimeout(verifyTimer); verifyTimer = undefined;
-      if (result.code) showVerification('ok', 'Read aloud to verify', result.code);
+      if (result.code) showVerification('ok', 'Same code on their screen? No one is listening in.', result.code);
       else showVerification('warn', result.error);
     });
   }
@@ -310,7 +310,7 @@ async function receive(message) {
     token = message.token; polite = message.polite; reconnectSince = 0; reconnectAttempt = 0; return;
   }
   if (message.type === 'ready') {
-    closePeer(); sessionId = message.sessionId; ready = true; createPeer();
+    closePeer(); sessionId = message.sessionId; ready = true; createPeer(); window.App?.onPeerJoined?.();
     status(`Connecting to ${peerName}…`); return;
   }
   if (message.type === 'peer-left') { closePeer(); status(`${peerName[0].toUpperCase() + peerName.slice(1)} disconnected. Waiting for them to return…`); return; }
@@ -577,6 +577,9 @@ else {
   const hash = new URLSearchParams(new URL(incoming).hash.slice(1));
   // Account invitations (#invite=…) belong to the sign-up screen, not the call flow.
   if (hash.has('invite')) { window.pendingAccountInvite = hash.get('invite'); status('Create your account with this invitation.'); }
+  // Notification taps open a contact's conversation (#open=username); account.js picks it up after sign-in.
+  // It only selects a conversation: nothing in a URL may start or answer a call or capture media.
+  else if (hash.has('open')) window.pendingOpen = { user: hash.get('open'), call: hash.has('call') };
   else if (new URL(incoming).hash) { try { openInvitation(incoming); } catch (error) { status(error.message); $('invitation-panel').open = true; } }
   else { status('Open your invitation link to connect. Saved messages stay below.'); $('status').classList?.add('idle'); $('invitation-panel').open = true; }
 }

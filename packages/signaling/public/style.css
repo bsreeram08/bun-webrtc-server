@@ -255,3 +255,13 @@ body[data-auth="in"]:not([data-state="call"]) .topbar .verify { flex: 1; }
 body[data-auth="out"] .choices:has(#join:disabled), body[data-auth="out"][data-state="lobby"] #status.idle { display: none; }
 .guest-divider { display: none; color: var(--muted); font-size: 14px; text-align: center; margin: 4px 0 12px; }
 body[data-auth="out"][data-state="lobby"] .guest-divider { display: block; }
+/* Notifications and sounds */
+body:not([data-auth="in"]) .account-only { display: none !important; }
+.notify-banner { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; align-items: start; border: 1px solid var(--line); background: var(--surface-2); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 12px; }
+.notify-banner[hidden] { display: none; }
+.notify-banner .icon { color: var(--accent); margin-top: 2px; }
+.notify-banner p { margin: 0; font-size: 15px; }
+.notify-actions { grid-column: 2; display: flex; gap: 16px; align-items: center; margin-top: 6px; }
+.notify-actions .primary { padding: 8px 16px; }
+.toggle { display: flex; gap: 10px; align-items: center; color: var(--text); font-size: 15px; margin: 8px 0; }
+.toggle input { width: 20px; height: 20px; accent-color: var(--accent); flex: none; }
