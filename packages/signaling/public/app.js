@@ -1,6 +1,6 @@
 'use strict';
 const $ = id => document.getElementById(id);
-const status = message => { $('status').textContent = message; };
+const status = message => { $('status').textContent = message; $('status').classList?.remove('idle'); };
 let roomId = null, token = null, validInvite = false;
 let socket, stream, pc, config, sessionId, polite = false, ready = false, makingOffer = false;
 let ignoreOffer = false, settingAnswer = false, candidates = [], generation = 0, lifecycle = 0;
@@ -8,6 +8,8 @@ let active = false, joining = false, connecting = false, sessionPrepared = false
 let messages = Promise.resolve(), verifyTimer, verified = false;
 let dataChannel = null, flushTimer, requestChatFlush = null, chatBusy = false, historyRevision = 0, selectedHistory = '', transcriptSignature = '';
 let burnAck = null, peerBurned = false;
+// Account conversations keep one stable ChatStore id per contact pair across rooms; guest links use the room id.
+let conversationId = null, peerName = 'the other participant', accountChat = false;
 const encoder = new TextEncoder();
 const messageIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const chatStatus = text => { $('chat-status').textContent = text; };
@@ -31,17 +33,17 @@ function parseInvitation(value) {
 function openInvitation(value) {
   if (active || joining || chatBusy) throw new Error('Finish this conversation or message before opening another invitation.');
   const next = parseInvitation(value);
-  lifecycle++; roomId = next.id; token = next.credential; validInvite = true; selectedHistory = roomId; peerBurned = false;
+  lifecycle++; roomId = next.id; token = next.credential; validInvite = true; conversationId = selectedHistory = roomId; peerBurned = false; accountChat = false; peerName = 'the other participant';
   $('invitation-input').value = ''; $('invitation-panel').open = false;
   setJoinable(true);
   status('Invitation ready. Choose how to join.');
   refreshHistory();
 }
 function updateComposer() {
-  const canCompose = validInvite && selectedHistory === roomId && Boolean(window.ChatStore);
+  const canCompose = (validInvite || accountChat) && selectedHistory === conversationId && Boolean(window.ChatStore);
   $('chat-input').disabled = !canCompose || chatBusy;
   $('chat-send').disabled = !canCompose || chatBusy;
-  $('burn').disabled = !validInvite || chatBusy;
+  $('burn').disabled = $('conv-burn').disabled = !validInvite || chatBusy;
 }
 async function refreshHistory() {
   const revision = ++historyRevision;
@@ -51,11 +53,11 @@ async function refreshHistory() {
     if (revision !== historyRevision) return;
     const ids = [...new Set(records.map(record => record.conversationId))].reverse(), lastAt = new Map();
     for (const record of records) lastAt.set(record.conversationId, Math.max(lastAt.get(record.conversationId) || 0, record.createdAt));
-    if (roomId && !ids.includes(roomId)) ids.unshift(roomId);
-    if (!selectedHistory || !ids.includes(selectedHistory)) selectedHistory = roomId || ids[0] || '';
+    if (conversationId && !ids.includes(conversationId)) ids.unshift(conversationId);
+    if (!selectedHistory || !ids.includes(selectedHistory)) selectedHistory = conversationId || ids[0] || '';
     const selector = $('history-select'); selector.replaceChildren();
     if (!ids.length) selector.add(new Option('No conversations yet', ''));
-    for (const id of ids) selector.add(new Option(id === roomId ? 'This conversation' : `Earlier conversation — ${new Date(lastAt.get(id)).toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${clock(lastAt.get(id))}`, id));
+    for (const id of ids) selector.add(new Option(id === conversationId ? 'This conversation' : `Earlier conversation — ${new Date(lastAt.get(id)).toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${clock(lastAt.get(id))}`, id));
     view('history', ids.length ? 'yes' : 'no');
     selector.value = selectedHistory;
     const log = $('chat-log'), wasNearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
@@ -69,7 +71,7 @@ async function refreshHistory() {
         const text = document.createElement('p'); text.className = 'message-text'; text.textContent = record.text;
         const meta = document.createElement('small'); meta.className = 'message-meta';
         const delivery = { queued: 'Queued on this device', sent: 'Sent · delivery unconfirmed', delivered: 'Delivered to device', uncertain: 'Restored · delivery unconfirmed' }[record.status];
-        const detail = `${record.direction === 'outgoing' ? 'You' : 'Other participant'} · ${new Date(record.createdAt).toLocaleString()} · ${delivery}${record.expiresAt ? ' · Disappears ' + new Date(record.expiresAt).toLocaleString() : ''}`;
+        const detail = `${record.direction === 'outgoing' ? 'You' : peerName === 'the other participant' ? 'Other participant' : peerName} · ${new Date(record.createdAt).toLocaleString()} · ${delivery}${record.expiresAt ? ' · Disappears ' + new Date(record.expiresAt).toLocaleString() : ''}`;
         const mark = record.direction === 'outgoing' ? { queued: ' 🕓', sent: ' ✓', delivered: ' ✓✓', uncertain: ' ?' }[record.status] : '';
         meta.textContent = `${record.expiresAt ? '⏱ ' : ''}${clock(record.createdAt)}${mark}`;
         meta.setAttribute('aria-label', detail); row.title = detail;
@@ -85,12 +87,12 @@ function detachChat() {
   requestChatFlush = null;
   const previous = dataChannel; dataChannel = null;
   if (previous) { previous.onclose = null; previous.close(); }
-  chatStatus('Messages stay on this device. Queued messages need both participants connected with a valid invitation.');
+  chatStatus(accountChat ? '' : 'Messages stay on this device. Queued messages need both participants connected with a valid invitation.');
 }
 function attachChat(peer, channel) {
   if (pc !== peer || !active || channel.label !== 'chat-v1' || !channel.ordered || channel.maxRetransmits !== null || channel.maxPacketLifeTime !== null || dataChannel) { channel.close(); return; }
   dataChannel = channel;
-  const current = generation, conversation = roomId, sent = new Set(), pendingAcks = new Set();
+  const current = generation, conversation = conversationId, sent = new Set(), pendingAcks = new Set();
   let queue = Promise.resolve(), queued = 0, windowStart = Date.now(), count = 0, flushing = false, pendingWake = false;
   const isCurrent = () => active && pc === peer && dataChannel === channel && generation === current;
   const fail = text => { if (isCurrent()) { channel.close(); chatStatus(text); } };
@@ -217,6 +219,7 @@ function cleanup(message) {
   $('invitation-load').disabled = false; $('invitation-input').disabled = false;
   view('state', 'lobby'); view('sheet', ''); view('panel', ''); $('chat-toggle').setAttribute('aria-expanded', 'false');
   status(message);
+  window.App?.onEnd?.();
 }
 function matchesGeneration(peer, candidate) {
   return !candidate?.usernameFragment || peer.remoteDescription?.sdp.split('\r\n')
@@ -303,12 +306,12 @@ async function receive(message) {
   }
   if (message.type === 'ready') {
     closePeer(); sessionId = message.sessionId; ready = true; createPeer();
-    status('Connecting to the other participant…'); return;
+    status(`Connecting to ${peerName}…`); return;
   }
-  if (message.type === 'peer-left') { closePeer(); status('The other participant disconnected. Waiting for them to return…'); return; }
+  if (message.type === 'peer-left') { closePeer(); status(`${peerName[0].toUpperCase() + peerName.slice(1)} disconnected. Waiting for them to return…`); return; }
   if (message.type === 'error') {
     // These refer to a retired pairing; its messages must not affect the new one.
-    if (message.error !== 'Stale session') status('Waiting for the other participant to reconnect…');
+    if (message.error !== 'Stale session') status(`Waiting for ${peerName} to reconnect…`);
     return;
   }
   const peer = pc, current = generation;
@@ -351,13 +354,15 @@ function scheduleReconnect() {
     if (active && current === lifecycle) connectSocket(current);
   }, Math.min(500 * 2 ** Math.min(reconnectAttempt++, 4), 8000));
 }
-async function loadIce(current) {
+async function loadIce(current, attempt = 0) {
   const response = await fetch(`/rooms/${roomId}/ice`, {
     headers: { Authorization: `Bearer ${token}` }, cache: 'no-store', signal: AbortSignal.timeout(10000),
   });
   if (!active || current !== lifecycle) return false;
+  // Devices sharing one address (home Wi-Fi) can briefly hit the per-source limit; retry a few times.
+  if (response.status === 429 && attempt < 3) { await new Promise(resolve => setTimeout(resolve, 700 * (attempt + 1))); return loadIce(current, attempt + 1); }
   if (response.status === 401) { validInvite = false; token = null; updateComposer(); cleanup('Call ended or invitation expired. Request a new invitation to call again.'); return false; }
-  if (!response.ok) throw new Error('Call server unavailable');
+  if (!response.ok) throw new Error(`Call server unavailable (HTTP ${response.status})`);
   const next = await response.json();
   if (!active || current !== lifecycle) return false;
   config = next;
@@ -378,7 +383,7 @@ async function connectSocket(current) {
     connection.onopen = () => {
       if (socket !== connection) return;
       clearTimeout(handshakeTimer); handshakeTimer = undefined;
-      status('Waiting for the other participant…');
+      status(accountChat && stream ? `Calling ${peerName}…` : `Waiting for ${peerName}…`);
     };
     connection.onmessage = event => {
       messages = messages.then(() => { if (active && socket === connection) return receive(JSON.parse(event.data)); }).catch(() => {
@@ -389,9 +394,10 @@ async function connectSocket(current) {
       if (!active || socket !== connection) return;
       clearTimeout(handshakeTimer); handshakeTimer = undefined;
       socket = null; closePeer();
-      if (event.code === 1000 || event.code === 1008) {
+      if ([1000, 1008, 4001, 4002].includes(event.code)) {
+        // 4001: the pair's room was replaced by a newer call; 4002: the call was declined.
         validInvite = false; token = null; updateComposer();
-        cleanup(peerBurned ? 'The other person burned this conversation. It was deleted on this device.' : 'Call ended or invitation expired. Request a new invitation to call again.');
+        cleanup(peerBurned ? 'The other person burned this conversation. It was deleted on this device.' : event.code === 4002 ? `${peerName[0].toUpperCase() + peerName.slice(1)} declined the call.` : event.code === 4001 ? 'Switched to a new call.' : accountChat ? 'Conversation ended.' : 'Call ended or invitation expired. Request a new invitation to call again.');
       }
       else scheduleReconnect();
     };
@@ -401,10 +407,9 @@ async function connectSocket(current) {
     if (active && current === lifecycle) scheduleReconnect();
   } finally { if (current === lifecycle) connecting = false; }
 }
-$('join-form').addEventListener('submit', async event => {
-  event.preventDefault();
+$('join-form').addEventListener('submit', event => { event.preventDefault(); return join(event.submitter?.value); });
+async function join(choice) {
   if (joining || !validInvite) return;
-  const choice = event.submitter?.value;
   if (choice) { $('chat-only').checked = choice === 'chat'; $('audio-only').checked = choice === 'audio'; }
   joining = true; active = true; sessionPrepared = false; const current = ++lifecycle;
   setJoinable(false); $('hangup').disabled = false;
@@ -427,9 +432,9 @@ $('join-form').addEventListener('submit', async event => {
   } catch (error) {
     if (current !== lifecycle) return;
     cleanup(error.name === 'NotAllowedError' ? 'Microphone or camera permission denied. Allow access, then try again.' : error.name === 'NotFoundError' ? 'No microphone or camera found. Connect a device or try audio only.' : 'Unable to join. Check your invitation, connection, and media permissions.');
-    setJoinable(true);
+    setJoinable(!accountChat);
   }
-});
+}
 $('mute').onclick = () => {
   const muted = $('mute').getAttribute('aria-pressed') !== 'true';
   stream?.getAudioTracks().forEach(track => { track.enabled = !muted; });
@@ -467,7 +472,7 @@ $('burn-confirm-yes').onclick = async () => {
   $('burn-confirm').hidden = true;
   if (!validInvite || chatBusy) return;
   chatBusy = true; updateComposer();
-  const conversation = roomId;
+  const conversation = conversationId;
   let confirmed = false;
   try {
     if (dataChannel?.readyState === 'open') {
@@ -495,21 +500,25 @@ $('invitation-form').addEventListener('submit', event => {
 });
 window.addEventListener('hashchange', () => {
   const incoming = location.href; history.replaceState(null, '', location.pathname);
+  const invite = new URLSearchParams(new URL(incoming).hash.slice(1)).get('invite');
+  if (invite) { window.pendingAccountInvite = invite; window.App?.onInvite?.(invite); return; }
   try { openInvitation(incoming); } catch (error) { status(error.message); }
 });
 $('history-select').onchange = () => { selectedHistory = $('history-select').value; refreshHistory(); };
 $('chat-form').addEventListener('submit', async event => {
   event.preventDefault();
-  if (chatBusy || !validInvite || selectedHistory !== roomId) return;
+  if (chatBusy || !(validInvite || accountChat) || selectedHistory !== conversationId) return;
   const text = $('chat-input').value;
   if (!text.trim() || encoder.encode(text).length > 4096) { chatStatus('Enter a message up to 4096 UTF-8 bytes.'); return; }
   chatBusy = true; updateComposer();
   const createdAt = Date.now(), duration = Number($('disappear').value) || 0;
   try {
-    await window.ChatStore.put({ id: crypto.randomUUID(), conversationId: roomId, direction: 'outgoing', text, createdAt, status: 'queued', expiresAt: duration ? createdAt + duration : null });
+    await window.ChatStore.put({ id: crypto.randomUUID(), conversationId, direction: 'outgoing', text, createdAt, status: 'queued', expiresAt: duration ? createdAt + duration : null });
     requestChatFlush?.();
     $('chat-input').value = ''; resizeComposer();
-    chatStatus(dataChannel?.readyState === 'open' ? 'Message queued for encrypted delivery.' : 'Queued on this device. Both participants need a valid invitation and a connection to exchange it.');
+    if (dataChannel?.readyState === 'open') chatStatus('');
+    else if (accountChat) { chatStatus(`Will send when ${peerName} is online.`); window.App?.onQueued?.(); }
+    else chatStatus('Queued on this device. Both participants need a valid invitation and a connection to exchange it.');
     await refreshHistory();
   } catch (error) { chatStatus(error.message || 'Could not save this message.'); }
   finally { chatBusy = false; updateComposer(); }
@@ -554,7 +563,31 @@ setInterval(() => { refreshHistory(); }, 5000);
 if (!window.isSecureContext || !window.RTCPeerConnection) status('Conversations require a supported browser over HTTPS (or localhost for development).');
 else {
   const incoming = location.href; history.replaceState(null, '', location.pathname);
-  if (new URL(incoming).hash) { try { openInvitation(incoming); } catch (error) { status(error.message); $('invitation-panel').open = true; } }
-  else { status('Open your invitation link to connect. Saved messages stay below.'); $('invitation-panel').open = true; }
+  const hash = new URLSearchParams(new URL(incoming).hash.slice(1));
+  // Account invitations (#invite=…) belong to the sign-up screen, not the call flow.
+  if (hash.has('invite')) { window.pendingAccountInvite = hash.get('invite'); status('Create your account with this invitation.'); }
+  else if (new URL(incoming).hash) { try { openInvitation(incoming); } catch (error) { status(error.message); $('invitation-panel').open = true; } }
+  else { status('Open your invitation link to connect. Saved messages stay below.'); $('status').classList?.add('idle'); $('invitation-panel').open = true; }
 }
+  // Hooks for account.js: contact conversations reuse this call and chat engine unchanged.
+window.App = {
+  get active() { return active; }, get roomId() { return roomId; }, get conversationId() { return conversationId; },
+  status, refreshHistory, view,
+  openConversation(next) {
+    if (active && conversationId !== next.conversationId) throw new Error('busy');
+    conversationId = selectedHistory = next.conversationId; peerName = next.peerName; accountChat = true; transcriptSignature = '';
+    if (!active) { validInvite = false; chatStatus(next.online ? '' : `${next.peerName} is offline. Messages wait on this device.`); }
+    refreshHistory();
+  },
+  closeConversation() { if (!active) { accountChat = false; conversationId = null; selectedHistory = ''; refreshHistory(); } },
+  async start(next) {
+    if (active) { cleanup('Switching conversation…'); }
+    lifecycle++; roomId = next.roomId; token = next.token; validInvite = true; peerBurned = false;
+    conversationId = selectedHistory = next.conversationId; peerName = next.peerName; accountChat = true;
+    $('remote').closest('figure').querySelector('figcaption').textContent = next.peerName;
+    await join(next.kind === 'chat' ? 'chat' : next.kind === 'voice' ? 'audio' : 'video');
+  },
+  end: () => endRoom('Conversation ended.'),
+  leave() { if (active) cleanup('Conversation closed.'); },
+};
 refreshHistory();

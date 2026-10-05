@@ -166,3 +166,82 @@ body[data-state="chat"] #settings { position: fixed; z-index: 40; inset: auto 0 
   .round .icon, .choice, button { transition: background-color .15s, transform .15s; }
   .round:active:not(:disabled) .icon { scale: .94; }
 }
+
+/* ---------- Accounts: welcome, chat list, conversation header, incoming call ---------- */
+.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+.wide { width: 100%; display: flex; align-items: center; justify-content: center; gap: 10px; }
+.link { background: none; border: 0; color: var(--accent); padding: 6px 0; }
+.welcome h2 { font-size: 20px; margin-bottom: 4px; }
+.welcome > .note { margin-bottom: 14px; }
+.welcome details { margin-top: 14px; }
+#register-form { display: grid; gap: 6px; margin-top: 12px; }
+#register-form input, #contact-input, #invite-link { width: 100%; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 12px; padding: 11px 12px; }
+#register-form button { margin-top: 8px; }
+#account-status:empty, #chats-status:empty { display: none; }
+#account-status { margin-top: 12px; color: var(--warn); font-size: 14px; }
+.chats-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+#me-name { color: var(--muted); font-size: 14px; }
+#contact-form { display: flex; gap: 8px; margin-bottom: 12px; }
+#contact-form input { flex: 1; min-width: 0; border-radius: 22px; padding-left: 16px; }
+#contact-add { border-radius: 22px; }
+#chats-status { font-size: 14px; color: var(--muted); margin: 0 0 10px; }
+.invite-result { border: 1px solid #2f5f47; background: var(--ok-bg); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 12px; }
+.invite-row { display: flex; gap: 8px; margin: 6px 0; }
+.invite-row input { flex: 1; min-width: 0; font-size: 14px; }
+#contact-list { list-style: none; margin: 0; padding: 0; }
+.contact { position: relative; display: flex; align-items: center; gap: 12px; padding: 12px 4px; border-bottom: 1px solid var(--line); }
+.contact-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.contact-text small { color: var(--muted); font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.contact time { align-self: flex-start; color: var(--muted); font-size: 12px; padding-top: 2px; font-variant-numeric: tabular-nums; }
+.contact > button:not(.row-button) { padding: 7px 12px; font-size: 14px; border-radius: 18px; position: relative; z-index: 1; }
+.row-button { position: absolute; inset: 0; background: transparent; border: 0; border-radius: 12px; padding: 0; }
+.row-button:hover { background: #ffffff08; }
+.empty { color: var(--muted); text-align: center; padding: 32px 12px; font-size: 14px; }
+.avatar { position: relative; display: grid; place-items: center; flex: none; width: 46px; height: 46px; border-radius: 50%; background: var(--raised); color: var(--accent); font-weight: 700; font-size: 18px; }
+.avatar[data-online="true"]::after { content: ""; position: absolute; right: 0; bottom: 1px; width: 12px; height: 12px; border-radius: 50%; background: #4ade80; border: 2px solid var(--bg); }
+.avatar.big { width: 88px; height: 88px; font-size: 36px; margin: 4px auto 12px; }
+.conv-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+.conv-head .avatar { width: 40px; height: 40px; font-size: 16px; }
+.conv-title { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
+.conv-title strong { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#conv-presence { color: var(--muted); font-size: 13px; }
+.conv-head .icon-button:not(:disabled) { color: var(--accent); }
+.conv-head .menu summary { width: 40px; height: 40px; background: transparent; }
+.incoming-card { text-align: center; }
+.incoming-card h2 { font-size: 22px; }
+.incoming-card .dialog-actions { justify-content: center; gap: 14px; }
+.incoming-card .dialog-actions button { min-width: 120px; padding: 13px 18px; border-radius: 26px; }
+@media (prefers-reduced-motion: no-preference) {
+  #incoming:not([hidden]) .avatar { animation: ring 1.4s ease-in-out infinite; }
+  @keyframes ring { 50% { box-shadow: 0 0 0 14px #a1efce22; } }
+}
+
+/* Account visibility. Guests (signed out) keep the invitation-link lobby below the sign-in card. */
+#welcome, #chats, #conv-head { display: none; }
+body[data-auth="out"][data-state="lobby"] #welcome { display: block; }
+body[data-auth="in"][data-screen="list"]:not([data-state="call"]) #chats { display: block; }
+body[data-auth="in"][data-screen="conversation"]:not([data-state="call"]) #conv-head { display: flex; }
+body[data-auth="in"] .lobby-only, body[data-auth="in"] #history-select, body[data-auth="in"] #chat-heading, body[data-auth="checking"] #status { display: none !important; }
+body[data-auth="in"][data-screen="list"]:not([data-state="call"]) :is(.chat-section, .session-only, .controls, #status) { display: none !important; }
+body[data-auth="in"][data-state="lobby"] #status { display: none; }
+body[data-auth="in"][data-state="lobby"]:not([data-panel="settings"]) #settings { display: none; }
+body[data-auth="in"][data-state="lobby"][data-panel="settings"] #settings { position: fixed; z-index: 40; inset: auto 0 0 0; max-height: 85dvh; overflow-y: auto; margin: 0; border-radius: 22px 22px 0 0; background: var(--surface); padding-bottom: calc(var(--bottom) + 16px); }
+body[data-auth="in"][data-state="lobby"][data-panel="settings"] #settings-close { display: grid !important; }
+/* A conversation without a live session: full-height messenger that queues on this device. */
+body[data-auth="in"][data-screen="conversation"]:is([data-state="lobby"], [data-state="chat"]) main { display: flex; flex-direction: column; height: 100dvh; padding: var(--top) 0 0; max-width: 720px; }
+body[data-auth="in"][data-screen="conversation"][data-state="lobby"] .chat-section { display: flex !important; flex: 1; min-height: 0; margin: 0; border: 0; border-radius: 0; }
+body[data-auth="in"][data-screen="conversation"][data-state="lobby"] :is(.composer, #chat-status) { display: flex; }
+body[data-auth="in"][data-screen="conversation"][data-state="lobby"] #chat-log { flex: 1; max-height: none; }
+body[data-auth="in"][data-screen="conversation"] .chat-head { display: none; }
+body[data-auth="in"][data-screen="conversation"] .composer { padding-bottom: calc(var(--bottom) + 8px); }
+body[data-auth="in"][data-state="chat"] .controls { display: none; }
+body[data-auth="in"][data-state="chat"] .topbar { padding: 8px 12px; min-height: 0; }
+body[data-auth="in"][data-state="chat"] #status { margin: 6px 12px 0; }
+/* The chat list keeps normal page padding even while a chat runs in the background. */
+body[data-auth="in"][data-screen="list"]:not([data-state="call"]) main { display: block; height: auto; max-width: 560px; padding: calc(20px + var(--top)) 16px calc(32px + var(--bottom)); }
+body[data-auth="in"]:not([data-state="call"]) .topbar .menu { display: none; }
+body[data-auth="in"]:not([data-state="call"]) .topbar .verify { flex: 1; }
+/* Signed out: the guest call-link flow stays available but quiet until a link is opened. */
+body[data-auth="out"] .choices:has(#join:disabled), body[data-auth="out"][data-state="lobby"] #status.idle { display: none; }
+.guest-divider { display: none; color: var(--muted); font-size: 14px; text-align: center; margin: 4px 0 12px; }
+body[data-auth="out"][data-state="lobby"] .guest-divider { display: block; }

@@ -6,10 +6,22 @@
   <title>Private conversations</title><link rel="stylesheet" href="/style.css"><link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/icon-192.png">
   <script src="/chat-store.js" defer></script>
   <script src="/verify.js" defer></script>
+  <script src="/vendor/simplewebauthn-browser.js" defer></script>
   <script src="/app.js" defer></script>
+  <script src="/account.js" defer></script>
   <script src="/install.js" defer></script>
 </head>
-<body id="app" data-state="lobby" data-history="no"><main>
+<body id="app" data-state="lobby" data-history="no" data-auth="checking"><main>
+  <header id="conv-head" class="conv-head">
+    <button id="conv-back" class="icon-button" type="button" aria-label="Back to chats"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg></button>
+    <span id="conv-avatar" class="avatar" aria-hidden="true"></span>
+    <div class="conv-title"><strong id="conv-name"></strong><small id="conv-presence"></small></div>
+    <button id="conv-voice" class="icon-button" type="button" aria-label="Voice call"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></svg></button>
+    <button id="conv-video" class="icon-button" type="button" aria-label="Video call"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg></button>
+    <details id="conv-menu" class="menu"><summary aria-label="Conversation options"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></summary>
+      <div class="menu-panel"><button id="conv-burn" class="danger-text" type="button" disabled>Burn conversation</button><button id="conv-remove" class="danger-text" type="button">Remove contact</button></div></details>
+  </header>
+
   <div class="topbar session-only">
     <div id="verify-code" class="verify" role="status" aria-live="polite" data-kind="pending" hidden>
       <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
@@ -28,6 +40,47 @@
     <div><h1>Private conversations</h1><p class="tagline">Calls and chat that go straight between your devices.</p></div>
   </header>
 
+  <section id="welcome" class="card welcome" aria-labelledby="welcome-title">
+    <h2 id="welcome-title">Sign in</h2>
+    <p class="note">Use a passkey — your fingerprint, face or screen lock. No passwords.</p>
+    <button id="signin" class="primary wide" type="button"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="M10.8 12.2L20 3M17 6l3 3M15 8l2 2"/></svg><span>Sign in with passkey</span></button>
+    <details id="register-panel"><summary>Have an invite? Create account</summary>
+      <form id="register-form">
+        <label for="register-invite">Invite code</label>
+        <input id="register-invite" autocomplete="off" spellcheck="false" autocapitalize="off" required pattern="[A-Za-z0-9_\-]{22}" placeholder="From the person who invited you">
+        <label for="register-username">Choose a username</label>
+        <input id="register-username" autocomplete="username webauthn" spellcheck="false" autocapitalize="off" required pattern="[a-z0-9_]{3,20}" maxlength="20" placeholder="3–20 letters, digits or _">
+        <button id="register-submit" class="primary wide" type="submit">Create account with passkey</button>
+      </form>
+    </details>
+    <p id="account-status" role="status" aria-live="polite"></p>
+  </section>
+
+  <section id="chats" class="chats" aria-labelledby="chats-title">
+    <header class="chats-head">
+      <div><h1 id="chats-title">Chats</h1><small id="me-name"></small></div>
+      <details id="account-menu" class="menu"><summary aria-label="Account options"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></summary>
+        <div class="menu-panel">
+          <button id="invite-create" type="button">Invite someone</button>
+          <button id="account-settings" type="button">Backup and settings</button>
+          <button id="signout" type="button">Sign out</button>
+          <button id="signout-all" class="danger-text" type="button">Sign out everywhere</button>
+        </div></details>
+    </header>
+    <form id="contact-form"><label for="contact-input" class="sr-only">Add a contact by username</label>
+      <input id="contact-input" autocomplete="off" spellcheck="false" autocapitalize="off" required pattern="[A-Za-z0-9_]{3,20}" maxlength="20" placeholder="Add contact by username">
+      <button id="contact-add" type="submit">Add</button></form>
+    <div id="invite-result" class="invite-result" hidden>
+      <label for="invite-link">Invitation link</label>
+      <div class="invite-row"><input id="invite-link" readonly><button id="invite-copy" type="button">Copy</button></div>
+      <p id="invite-expiry" class="note"></p><button id="invite-close" class="link" type="button">Done</button>
+    </div>
+    <p id="chats-status" role="status" aria-live="polite"></p>
+    <ul id="contact-list" aria-label="Chats"></ul>
+    <p id="contacts-empty" class="empty">No contacts yet. Add someone by username, or invite them from the ⋯ menu.</p>
+  </section>
+
+  <p class="guest-divider">Or join with a one-time call link</p>
   <p id="status" role="status" aria-live="polite">Checking invitation…</p>
 
   <form id="join-form" class="choices lobby-only">
@@ -61,6 +114,18 @@
     <h2 id="burn-title">Burn this conversation?</h2>
     <p>Messages are deleted here, the other device is asked to delete them too, and the room closes for both of you. Backup files are not affected.</p>
     <div class="dialog-actions"><button id="burn-cancel">Keep it</button><button id="burn-confirm-yes" class="danger">Burn it</button></div>
+  </div></div>
+
+  <div id="incoming" class="dialog" role="alertdialog" aria-labelledby="incoming-title" aria-describedby="incoming-kind" hidden><div class="dialog-card incoming-card">
+    <span id="incoming-avatar" class="avatar big" aria-hidden="true"></span>
+    <h2 id="incoming-title"></h2><p id="incoming-kind"></p>
+    <div class="dialog-actions"><button id="incoming-decline" class="danger">Decline</button><button id="incoming-accept" class="primary">Accept</button></div>
+  </div></div>
+
+  <div id="remove-confirm" class="dialog" role="alertdialog" aria-labelledby="remove-title" hidden><div class="dialog-card">
+    <h2 id="remove-title">Remove this contact?</h2>
+    <p>You stop seeing each other online and can no longer call or message until one of you adds the other again. Messages on this device stay.</p>
+    <div class="dialog-actions"><button id="remove-cancel">Keep</button><button id="remove-yes" class="danger">Remove</button></div>
   </div></div>
 
   <section class="chat-section" aria-labelledby="chat-heading">
