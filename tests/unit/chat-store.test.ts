@@ -1,19 +1,19 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
-import { IDBFactory } from 'fake-indexeddb';
+import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 
 const source = readFileSync(new URL('../../packages/signaling/public/chat-store.js', import.meta.url), 'utf8');
 const PASSWORD = 'correct horse battery staple';
 const NOW = 1800000000000;
 const ROOM = 'r'.repeat(43);
 type Message = { id: string; conversationId: string; direction: 'incoming' | 'outgoing'; text: string; createdAt: number; status: 'queued' | 'sent' | 'delivered' | 'uncertain'; expiresAt: number | null };
-type Store = { put(message: unknown): Promise<Message>; list(): Promise<Message[]>; clear(): Promise<void>; setStatus(conversationId: string, id: string, status: string): Promise<boolean>; exportBackup(password: string): Promise<Blob>; importBackup(file: Blob, password: string): Promise<number> };
+type Store = { put(message: unknown): Promise<Message>; list(): Promise<Message[]>; clear(): Promise<void>; removeConversation(conversationId: string): Promise<void>; setStatus(conversationId: string, id: string, status: string): Promise<boolean>; exportBackup(password: string): Promise<Blob>; importBackup(file: Blob, password: string): Promise<number> };
 function fixture() {
   let now = NOW;
   class Clock extends Date { static override now() { return now; } }
   const indexedDB = new IDBFactory();
-  const context: Record<string, any> = { indexedDB, crypto, Blob, TextEncoder, TextDecoder, Uint8Array, Date: Clock, atob, btoa };
+  const context: Record<string, any> = { indexedDB, IDBKeyRange, crypto, Blob, TextEncoder, TextDecoder, Uint8Array, Date: Clock, atob, btoa };
   context.window = context;
   runInNewContext(source, context);
   return { store: context.ChatStore as Store, indexedDB, advance(ms: number) { now += ms; } };
@@ -32,6 +32,17 @@ async function envelopeFor(payload: unknown, password = PASSWORD) {
 }
 
 describe('device-only chat storage', () => {
+  test('burning one conversation removes only that conversation', async () => {
+    const { store } = fixture();
+    const burned = [message(), message({ direction: 'incoming', status: 'delivered' })];
+    const kept = message({ conversationId: 's'.repeat(43) });
+    for (const item of [...burned, kept]) await store.put(item);
+    await store.removeConversation(ROOM);
+    expect(await store.list()).toEqual([kept]);
+    await store.removeConversation(ROOM);
+    await expect(store.removeConversation('bad-room')).rejects.toThrow('Invalid conversation');
+    expect(await store.list()).toEqual([kept]);
+  });
   test('late delivery updates cannot resurrect cleared or expired history', async () => {
     const f = fixture(), item = message();
     expect(await f.store.setStatus(item.conversationId, item.id, 'sent')).toBe(false);

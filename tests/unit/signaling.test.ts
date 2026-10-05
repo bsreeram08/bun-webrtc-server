@@ -34,6 +34,8 @@ function connect(base: URL, invitation: Invitation, participant = 0) {
     socket.addEventListener('message', event => {
         const value = JSON.parse(event.data as string);
         if (value.type === 'ready') sessionId = value.sessionId;
+        // Track the single-use credential rotation so later reconnects use the live token.
+        if (value.type === 'welcome') invitation.participants[participant].token = value.token;
         if (value.type === 'peer-left') sessionId = undefined;
         const waiter = pending.shift();
         if (waiter) { clearTimeout(waiter.timer); waiter.resolve(value); } else messages.push(value);
@@ -54,9 +56,9 @@ function connect(base: URL, invitation: Invitation, participant = 0) {
 async function pair(instance: ReturnType<typeof app>, invitation?: Invitation) {
     const room = invitation ?? await instance.room();
     const a = connect(instance.base, room);
-    expect(await a.next()).toEqual({ type: 'welcome', polite: false });
+    expect(await a.next()).toEqual({ type: 'welcome', polite: false, token: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) });
     const b = connect(instance.base, room, 1);
-    expect(await b.next()).toEqual({ type: 'welcome', polite: true });
+    expect(await b.next()).toEqual({ type: 'welcome', polite: true, token: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) });
     expect(await a.next()).toEqual({ type: 'ready', sessionId: expect.any(String) });
     expect(await b.next()).toEqual({ type: 'ready', sessionId: a.sessionId });
     return { a, b, room };
@@ -207,9 +209,29 @@ describe('self-hosted signaling over real HTTP and WebSocket sockets', () => {
         b.send({ type: 'candidate', candidate: null });
         expect(await b.next()).toEqual({ type: 'error', error: 'Peer unavailable' });
         const reconnected = connect(instance.base, room);
-        expect(await reconnected.next()).toEqual({ type: 'welcome', polite: false });
+        expect(await reconnected.next()).toEqual({ type: 'welcome', polite: false, token: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) });
         expect(await reconnected.next()).toEqual({ type: 'ready', sessionId: expect.any(String) });
         expect(await b.next()).toEqual({ type: 'ready', sessionId: reconnected.sessionId });
+    });
+    test('invitations are single-use: the original token dies once its socket is accepted', async () => {
+        const instance = app(); const room = await instance.room();
+        const original = room.participants[0].token;
+        const a = connect(instance.base, room);
+        const welcome = await a.next();
+        expect(welcome.token).not.toBe(original);
+        expect(room.participants[0].token).toBe(welcome.token);
+        const ice = (bearer: string) => instance.request(`/rooms/${room.roomId}/ice`, { headers: { Authorization: `Bearer ${bearer}` } });
+        expect((await ice(original)).status).toBe(401);
+        expect((await ice(welcome.token)).status).toBe(200);
+        a.socket.close(); await a.closed;
+        expect((await instance.request(`/rooms/${room.roomId}/socket`, { headers: upgradeHeaders(original) })).status).toBe(401);
+        expect((await instance.request(`/rooms/${room.roomId}`, { method: 'DELETE', headers: { Authorization: `Bearer ${original}` } })).status).toBe(401);
+        const rejoined = connect(instance.base, room);
+        const second = await rejoined.next();
+        expect(second.type).toBe('welcome');
+        expect(second.token).not.toBe(welcome.token);
+        expect((await ice(welcome.token)).status).toBe(401);
+        expect((await ice(second.token)).status).toBe(200);
     });
     test('hangup ends the room and revokes both invitations', async () => {
         const instance = app(); const { a, b, room } = await pair(instance);

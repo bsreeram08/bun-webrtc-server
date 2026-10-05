@@ -5,6 +5,7 @@
   <meta name="referrer" content="no-referrer"><meta name="theme-color" content="#111820">
   <title>Private conversations</title><link rel="stylesheet" href="/style.css"><link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/icon-192.png">
   <script src="/chat-store.js" defer></script>
+  <script src="/verify.js" defer></script>
   <script src="/app.js" defer></script>
   <script src="/install.js" defer></script>
 </head>
@@ -18,6 +19,7 @@
     <p class="note">Keep your invitation private. It stays in this page’s memory and is never included in a backup.</p>
   </details>
   <p id="status" role="status" aria-live="polite">Checking invitation…</p>
+  <p id="verify-code" role="status" aria-live="polite" hidden></p>
   <form id="join-form">
     <label><input id="audio-only" type="checkbox"> Audio only</label>
     <label><input id="chat-only" type="checkbox"> Chat only (no microphone or camera)</label>
@@ -32,7 +34,9 @@
     <button id="camera" disabled aria-pressed="false">Turn camera off</button>
     <button id="play" hidden>Play incoming audio</button>
     <button id="hangup" class="danger" disabled>End call</button>
+    <button id="burn" class="danger" disabled>Burn conversation</button>
   </div>
+  <div id="burn-confirm" hidden><p>Burn this conversation? Its messages are deleted on this device, the other device is asked to delete them too, and the room closes for both of you. Copies in backup files are not affected.</p><button id="burn-confirm-yes" class="danger">Burn it</button><button id="burn-cancel">Keep conversation</button></div>
   <section class="chat-section" aria-labelledby="chat-heading"><h2 id="chat-heading">Messages</h2>
     <label for="history-select">Conversation history on this device</label><select id="history-select"><option value="">No conversations yet</option></select>
     <p id="chat-status" role="status" aria-live="polite">Open an invitation to send messages. Saved history is available on this device.</p>
@@ -54,5 +58,5 @@
     <button id="history-clear" class="danger">Delete local history</button>
     <div id="clear-confirm" hidden><p>Delete every message saved in this browser? This does not delete another device’s messages or backup files. New messages can still arrive while connected.</p><button id="history-clear-confirm" class="danger">Delete all local messages</button><button id="history-clear-cancel">Keep messages</button></div>
   </details>
-  <p class="note">Chat and media use encrypted WebRTC transport. Trust your devices and the server delivering this app; this is not Signal’s identity verification. Local history is readable by anyone with access to this browser. Clearing browser storage deletes its local copy. On phones, use your browser’s Add to Home Screen option. Keep the app open during conversations.</p>
+  <p class="note">Chat and media use encrypted WebRTC transport. Compare the verification code aloud on every call: matching codes mean no one is relaying your connection, including this server. Invitation links work once; reconnects use a fresh credential kept in this page. You still trust your devices and the server delivering this app’s code. Local history is readable by anyone with access to this browser. Clearing browser storage deletes its local copy. On phones, use your browser’s Add to Home Screen option. Keep the app open during conversations.</p>
 </main></body></html>

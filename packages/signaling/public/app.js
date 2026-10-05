@@ -7,6 +7,7 @@ let ignoreOffer = false, settingAnswer = false, candidates = [], generation = 0,
 let active = false, joining = false, connecting = false, sessionPrepared = false, reconnectTimer, restartTimer, handshakeTimer, reconnectSince = 0, reconnectAttempt = 0, iceRestarts = 0;
 let messages = Promise.resolve();
 let dataChannel = null, flushTimer, requestChatFlush = null, chatBusy = false, historyRevision = 0, selectedHistory = '', transcriptSignature = '';
+let burnAck = null, peerBurned = false;
 const encoder = new TextEncoder();
 const messageIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const chatStatus = text => { $('chat-status').textContent = text; };
@@ -23,7 +24,7 @@ function parseInvitation(value) {
 function openInvitation(value) {
   if (active || joining || chatBusy) throw new Error('Finish this conversation or message before opening another invitation.');
   const next = parseInvitation(value);
-  lifecycle++; roomId = next.id; token = next.credential; validInvite = true; selectedHistory = roomId;
+  lifecycle++; roomId = next.id; token = next.credential; validInvite = true; selectedHistory = roomId; peerBurned = false;
   $('invitation-input').value = ''; $('invitation-panel').open = false;
   $('join').disabled = false; $('audio-only').disabled = $('chat-only').checked; $('chat-only').disabled = false;
   status('Invitation ready. Join with video, audio only, or chat only.');
@@ -33,6 +34,7 @@ function updateComposer() {
   const canCompose = validInvite && selectedHistory === roomId && Boolean(window.ChatStore);
   $('chat-input').disabled = !canCompose || chatBusy;
   $('chat-send').disabled = !canCompose || chatBusy;
+  $('burn').disabled = !validInvite || chatBusy;
 }
 async function refreshHistory() {
   const revision = ++historyRevision;
@@ -137,6 +139,15 @@ function attachChat(peer, channel) {
     queue = queue.then(async () => {
       if (!isCurrent()) return;
       const packet = JSON.parse(event.data);
+      if (packet?.v === 1 && Object.keys(packet).length === 2 && packet.type === 'burned') { burnAck?.(); return; }
+      if (packet?.v === 1 && Object.keys(packet).length === 2 && packet.type === 'burn') {
+        // The other participant burned the conversation: delete our copy and confirm.
+        peerBurned = true;
+        await window.ChatStore.removeConversation(conversation);
+        if (isCurrent()) transmit({ v: 1, type: 'burned' });
+        status('The other person burned this conversation. It was deleted on this device.');
+        refreshHistory(); return;
+      }
       if (!packet || packet.v !== 1 || !messageIdPattern.test(packet.id || '') || !['message', 'ack'].includes(packet.type)) throw new Error('Invalid chat packet');
       const records = await window.ChatStore.list();
       if (!isCurrent()) return;
@@ -178,6 +189,7 @@ function closePeer() {
   pc = null; sessionId = null; ready = false; candidates = [];
   makingOffer = false; ignoreOffer = false; settingAnswer = false; iceRestarts = 0;
   $('remote').srcObject = null;
+  $('verify-code').hidden = true; $('verify-code').textContent = '';
 }
 function cleanup(message) {
   active = false; sessionPrepared = false; lifecycle++;
@@ -248,10 +260,19 @@ function createPeer() {
     finally { if (pc === peer) makingOffer = false; }
   };
   if (!polite) attachChat(peer, peer.createDataChannel('chat-v1', { ordered: true }));
+  if (window.Verify) window.Verify.attach(peer, peer.createDataChannel('verify-v1', { negotiated: true, id: 1000, ordered: true }), result => {
+    if (pc !== peer) return;
+    $('verify-code').hidden = false;
+    $('verify-code').textContent = result.code ? `Verification code: ${result.code} — read it aloud with the other person. If it doesn't match, end the call: someone is in the middle.` : result.error;
+  });
   return peer;
 }
 async function receive(message) {
-  if (message.type === 'welcome') { polite = message.polite; reconnectSince = 0; reconnectAttempt = 0; return; }
+  if (message.type === 'welcome') {
+    // The server retires the invitation on every accepted connection; keep only the fresh credential.
+    if (typeof message.token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(message.token)) throw new Error('Invalid welcome');
+    token = message.token; polite = message.polite; reconnectSince = 0; reconnectAttempt = 0; return;
+  }
   if (message.type === 'ready') {
     closePeer(); sessionId = message.sessionId; ready = true; createPeer();
     status('Connecting to the other participant…'); return;
@@ -342,7 +363,7 @@ async function connectSocket(current) {
       socket = null; closePeer();
       if (event.code === 1000 || event.code === 1008) {
         validInvite = false; token = null; updateComposer();
-        cleanup('Call ended or invitation expired. Request a new invitation to call again.');
+        cleanup(peerBurned ? 'The other person burned this conversation. It was deleted on this device.' : 'Call ended or invitation expired. Request a new invitation to call again.');
       }
       else scheduleReconnect();
     };
@@ -389,7 +410,7 @@ $('camera').onclick = () => {
   $('camera').setAttribute('aria-pressed', String(off)); $('camera').textContent = off ? 'Turn camera on' : 'Turn camera off';
 };
 $('play').onclick = () => $('remote').play().then(() => { $('play').hidden = true; }).catch(() => status('Use your browser’s audio controls to allow playback.'));
-$('hangup').onclick = async () => {
+async function endRoom(ended) {
   // Stop capture immediately, including when signaling or a permission prompt is pending.
   const endingRoom = roomId, endingToken = token;
   cleanup('Call stopped. Ending the room…');
@@ -397,8 +418,29 @@ $('hangup').onclick = async () => {
   validInvite = false; token = null; updateComposer();
   try {
     const response = await fetch(`/rooms/${endingRoom}`, { method: 'DELETE', headers: { Authorization: `Bearer ${endingToken}` }, signal: AbortSignal.timeout(5000) });
-    if (stoppedLifecycle === lifecycle) status(response.ok || response.status === 401 ? 'Call ended.' : 'Call stopped locally. Could not confirm the room ended.');
+    if (stoppedLifecycle === lifecycle) status(response.ok || response.status === 401 ? ended : 'Call stopped locally. Could not confirm the room ended.');
   } catch { if (stoppedLifecycle === lifecycle) status('Call stopped locally. Could not end the room while offline.'); }
+}
+$('hangup').onclick = () => endRoom('Call ended.');
+$('burn').onclick = () => { $('burn-confirm').hidden = false; };
+$('burn-cancel').onclick = () => { $('burn-confirm').hidden = true; };
+$('burn-confirm-yes').onclick = async () => {
+  $('burn-confirm').hidden = true;
+  if (!validInvite || chatBusy) return;
+  chatBusy = true; updateComposer();
+  const conversation = roomId;
+  let confirmed = false;
+  try {
+    if (dataChannel?.readyState === 'open') {
+      // Wait briefly for the other device to confirm deletion before the room closes the channel.
+      dataChannel.send(JSON.stringify({ v: 1, type: 'burn' }));
+      confirmed = await new Promise(resolve => { burnAck = () => resolve(true); setTimeout(() => resolve(false), 2000); });
+      burnAck = null;
+    }
+    await endRoom(confirmed ? 'Conversation burned on both devices. The room is closed.' : 'Conversation burned on this device. The other device did not confirm. The room is closed.');
+    await window.ChatStore.removeConversation(conversation);
+  } catch (error) { status(error.message || 'Could not burn this conversation.'); }
+  finally { chatBusy = false; updateComposer(); refreshHistory(); }
 };
 window.addEventListener('online', () => {
   if (!active || !sessionPrepared) return;

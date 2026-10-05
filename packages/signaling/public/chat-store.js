@@ -101,6 +101,17 @@
       return { writes: [{ ...previous, status: previous.status === 'delivered' ? 'delivered' : status }], result: true };
     });
   }
+  // Burning one conversation deletes only its records, keyed by the room identifier.
+  async function removeConversation(conversationId) {
+    if (typeof conversationId !== 'string' || !ROOM.test(conversationId)) throw new Error('Invalid conversation.');
+    const db = await openDatabase();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('messages', 'readwrite');
+      tx.oncomplete = () => resolve();
+      tx.onabort = () => reject(new Error('Could not delete this conversation.'));
+      tx.objectStore('messages').delete(IDBKeyRange.bound([conversationId], [conversationId, []]));
+    });
+  }
   // Clearing must also work if an older or corrupted record cannot be validated.
   async function clear() {
     const db = await openDatabase();
@@ -188,5 +199,5 @@
       return { writes: [...writes.values()], result: count };
     });
   }
-  window.ChatStore = Object.freeze({ put, list, clear, setStatus, exportBackup, importBackup });
+  window.ChatStore = Object.freeze({ put, list, clear, removeConversation, setStatus, exportBackup, importBackup });
 })();

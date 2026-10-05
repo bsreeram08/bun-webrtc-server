@@ -41,8 +41,8 @@ test('Bun WebSocket forwards 30-candidate bidirectional bursts after SDP without
             const b = client(app.server.url, room.roomId, room.participants[1].token); clients.push(b);
             await Promise.all([a.received(2), b.received(2)]);
             const sessionId = (a.messages[1] as { sessionId: string }).sessionId;
-            expect(a.messages).toEqual([{ type: 'welcome', polite: false }, { type: 'ready', sessionId: expect.any(String) }]);
-            expect(b.messages).toEqual([{ type: 'welcome', polite: true }, { type: 'ready', sessionId }]);
+            expect(a.messages).toEqual([{ type: 'welcome', polite: false, token: expect.any(String) }, { type: 'ready', sessionId: expect.any(String) }]);
+            expect(b.messages).toEqual([{ type: 'welcome', polite: true, token: expect.any(String) }, { type: 'ready', sessionId }]);
             const bursts = [0, 1].map(side => [
                 { type: 'description', description: { type: side === 0 ? 'offer' : 'answer', sdp: `v=0\r\na=ice-ufrag:${side}-${iteration}\r\n${'a=x:test\r\n'.repeat(iteration % 2 ? 5000 : 20)}` } },
                 ...Array.from({ length: 30 }, (_, index) => ({ type: 'candidate', candidate: {

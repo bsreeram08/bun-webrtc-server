@@ -29,12 +29,12 @@ test('an old pairing cannot deliver delayed ICE to a participant that has rejoin
         const a = connect(app.server.url, room.roomId, room.participants[0].token); clients.push(a);
         expect((await a.next()).type).toBe('welcome');
         const b = connect(app.server.url, room.roomId, room.participants[1].token); clients.push(b);
-        expect((await b.next()).type).toBe('welcome');
+        const bWelcome = await b.next(); expect(bWelcome.type).toBe('welcome');
         const oldReady = await a.next(); expect(oldReady.type).toBe('ready');
         expect((await b.next()).type).toBe('ready');
         b.socket.close(); await b.closed;
         expect((await a.next()).type).toBe('peer-left');
-        const rejoined = connect(app.server.url, room.roomId, room.participants[1].token); clients.push(rejoined);
+        const rejoined = connect(app.server.url, room.roomId, bWelcome.token); clients.push(rejoined);
         expect((await rejoined.next()).type).toBe('welcome');
         const freshReady = await rejoined.next(); expect(freshReady.type).toBe('ready');
         expect(freshReady.sessionId).toMatch(/^[A-Za-z0-9_-]{43}$/);
@@ -95,19 +95,21 @@ test('a disconnected participant can end its room over HTTP without administrato
             expect((await request(path, 'DELETE', bearer)).status).toBe(401);
         }
         expect((await request(path, 'DELETE', room.participants[0].token, 'https://evil.example')).status).toBe(403);
-        const a = connect(app.server.url, room.roomId, room.participants[0].token); clients.push(a); await a.next();
-        const b = connect(app.server.url, room.roomId, room.participants[1].token); clients.push(b); await b.next();
+        const a = connect(app.server.url, room.roomId, room.participants[0].token); clients.push(a); const aWelcome = await a.next();
+        const b = connect(app.server.url, room.roomId, room.participants[1].token); clients.push(b); const bWelcome = await b.next();
         await a.next(); await b.next();
         a.socket.close(); await a.closed;
         expect((await b.next()).type).toBe('peer-left');
-        const ended = await request(path, 'DELETE', room.participants[0].token, origin);
+        // Connected invitations were rotated; the original links can no longer end the room.
+        expect((await request(path, 'DELETE', room.participants[0].token, origin)).status).toBe(401);
+        const ended = await request(path, 'DELETE', aWelcome.token, origin);
         expect(ended.status).toBe(200);
         expect(ended.headers.get('cache-control')).toBe('no-store');
         expect(await ended.json()).toEqual({ status: 'ended' });
         await b.closed;
-        for (const participant of room.participants) {
-            expect((await request(`${path}/ice`, 'GET', participant.token)).status).toBe(401);
-            expect((await request(path, 'DELETE', participant.token)).status).toBe(401);
+        for (const credential of [aWelcome.token, bWelcome.token]) {
+            expect((await request(`${path}/ice`, 'GET', credential)).status).toBe(401);
+            expect((await request(path, 'DELETE', credential)).status).toBe(401);
         }
         // Either participant may end an unconnected room, and unrelated rooms survive.
         expect((await request(`/rooms/${other.roomId}/ice`, 'GET', other.participants[1].token)).status).toBe(200);

@@ -35,7 +35,7 @@ try {
   ownImages.push(`${id}:test`);
   console.log('Building isolated verification image…');
   await docker(['buildx', 'build', '--builder', id, '--load', '-t', `${id}:test`, '.']);
-  for (const file of ['app.js', 'chat-store.js', 'sw.js', 'index.html', 'style.css', 'install.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png']) {
+  for (const file of ['app.js', 'chat-store.js', 'verify.js', 'sw.js', 'index.html', 'style.css', 'install.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png']) {
     const imageHash = (await docker(['run', '--rm', '--entrypoint', 'sha256sum', `${id}:test`, `/app/packages/signaling/public/${file}`])).out.split(/\s/)[0];
     const sourceHash = new Bun.CryptoHasher('sha256').update(await Bun.file(join(root, `packages/signaling/public/${file}`)).arrayBuffer()).digest('hex');
     if (sourceHash !== imageHash) throw new Error('Client changed during image build; rerun verification');

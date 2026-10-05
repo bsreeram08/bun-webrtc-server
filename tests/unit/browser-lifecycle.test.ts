@@ -104,7 +104,7 @@ describe('browser capture and reconnect lifecycle', () => {
         page.acquire(); await joining;
         expect(page.sockets).toHaveLength(1);
         page.sockets[0].open();
-        page.sockets[0].receive({ type: 'welcome', polite: false });
+        page.sockets[0].receive({ type: 'welcome', polite: false, token: 'u'.repeat(43) });
         page.sockets[0].receive({ type: 'ready', sessionId: 's'.repeat(43) });
         await flush();
         expect(page.element('status').textContent).toContain('Connecting to the other participant');
@@ -170,6 +170,23 @@ describe('browser capture and reconnect lifecycle', () => {
         expect(page.element('local').srcObject).toBeNull();
         expect(page.element('hangup').disabled).toBe(true);
         expect(page.timers.size).toBe(0);
+    });
+
+    test('the rotated credential from welcome replaces the single-use invitation token', async () => {
+        const page = browser(); page.acquire(); await page.join();
+        page.sockets[0].open();
+        page.sockets[0].receive({ type: 'welcome', polite: false, token: 'u'.repeat(43) }); await flush();
+        await page.hangup();
+        const deletion = page.requests.find(request => request.init.method === 'DELETE')!;
+        expect((deletion.init.headers as Record<string, string>).Authorization).toBe(`Bearer ${'u'.repeat(43)}`);
+    });
+
+    test('a welcome without a valid rotated credential ends the attempt', async () => {
+        const page = browser(); page.acquire(); await page.join();
+        page.sockets[0].open();
+        page.sockets[0].receive({ type: 'welcome', polite: false }); await flush();
+        expect(page.element('status').textContent).toContain('Call negotiation failed');
+        expect(page.tracks.every(track => track.readyState === 'ended')).toBe(true);
     });
 
     test('a room ended by the other participant disables new message composition', async () => {

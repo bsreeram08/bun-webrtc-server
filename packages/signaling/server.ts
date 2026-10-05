@@ -6,7 +6,7 @@ import { validateTurnUrl } from './config';
 
 type Participant = { digest: string; socket?: ServerWebSocket<Connection> };
 type Room = { id: string; expiresAt: number; participants: Participant[]; sessionId?: string };
-type Connection = { room: Room; participant: Participant; allow: () => boolean };
+type Connection = { room: Room; participant: Participant; credential: string; allow: () => boolean };
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 const token = () => randomBytes(32).toString('base64url');
 const json = (value: unknown, status = 200) => Response.json(value, {
@@ -61,7 +61,7 @@ export function startSignaling(options: SignalingOptions) {
             if (!allowRequest(requestSource(server.requestIP(request)?.address, request.headers, options.trustProxy))) return json({ error: 'Rate limited' }, 429);
             const requestOrigin = request.headers.get('origin');
             if (requestOrigin && requestOrigin !== options.origin) return json({ error: 'Origin denied' }, 403);
-            if (request.method === 'GET' && ['/', '/app.js', '/chat-store.js', '/style.css', '/install.js', '/sw.js', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'].includes(url.pathname)) {
+            if (request.method === 'GET' && ['/', '/app.js', '/chat-store.js', '/verify.js', '/style.css', '/install.js', '/sw.js', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'].includes(url.pathname)) {
                 const path = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
                 return new Response(Bun.file(new URL(`./public/${path}`, import.meta.url)), { headers: {
                     'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; media-src 'self' blob:; img-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
@@ -102,7 +102,7 @@ export function startSignaling(options: SignalingOptions) {
                 const participant = room?.participants.find(value => value.digest === digest(protocols[1]));
                 if (!room || !participant || room.expiresAt <= now()) return json({ error: 'Unauthorized' }, 401);
                 if (participant.socket) return json({ error: 'Participant already connected' }, 409);
-                if (server.upgrade(request, { data: { room, participant, allow: packetBudget(100) }, headers: { 'Sec-WebSocket-Protocol': 'webrtc' } })) return;
+                if (server.upgrade(request, { data: { room, participant, credential: participant.digest, allow: packetBudget(100) }, headers: { 'Sec-WebSocket-Protocol': 'webrtc' } })) return;
                 return json({ error: 'WebSocket upgrade required' }, 400);
             }
             return json({ error: 'Not found' }, 404);
@@ -116,11 +116,16 @@ export function startSignaling(options: SignalingOptions) {
             sendPings: true,
             perMessageDeflate: false,
             open(socket) {
-                const { room, participant } = socket.data;
-                // Repeat the check after upgrade to cover simultaneous uses of one token.
-                if (participant.socket || room.expiresAt <= now() || !rooms.has(room.id)) { socket.close(1008, 'Participant unavailable'); return; }
+                const { room, participant, credential } = socket.data;
+                // Repeat the check after upgrade to cover simultaneous uses of one token,
+                // including an upgrade that raced the rotation of that token.
+                if (participant.socket || participant.digest !== credential || room.expiresAt <= now() || !rooms.has(room.id)) { socket.close(1008, 'Participant unavailable'); return; }
                 participant.socket = socket;
-                socket.send(JSON.stringify({ type: 'welcome', polite: room.participants.indexOf(participant) === 1 }));
+                // Invitations are single-use: each accepted connection replaces the credential,
+                // so a copied or leaked link cannot rejoin, fetch ICE or end the room later.
+                const next = token();
+                participant.digest = digest(next);
+                socket.send(JSON.stringify({ type: 'welcome', polite: room.participants.indexOf(participant) === 1, token: next }));
                 if (room.participants.every(value => value.socket)) {
                     room.sessionId = token();
                     for (const member of room.participants) member.socket!.send(JSON.stringify({ type: 'ready', sessionId: room.sessionId }));

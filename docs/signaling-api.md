@@ -40,11 +40,18 @@ The request's `Origin` must exactly match `PUBLIC_ORIGIN`. The server selects
 `webrtc`; it never echoes the credential. Do not log the offered subprotocol
 header. Only one active connection is allowed per participant token.
 
+Invitations are single-use. When a socket is accepted, the server replaces that
+participant's credential and returns the new token in `welcome`; the token that
+opened the socket immediately stops working for the socket, ICE and deletion
+endpoints. Clients keep the rotated token in memory for reconnects, ICE refreshes
+and hangup. A participant who loses it (for example by reloading the page) needs
+a new invitation.
+
 Server events:
 
 | Type | Fields | Meaning |
 | --- | --- | --- |
-| `welcome` | `polite` | The participant is authenticated. The non-polite participant initiates the first offer. |
+| `welcome` | `polite`, `token` | The participant is authenticated. `token` replaces the presented credential (single-use invitations). The non-polite participant initiates the first offer. |
 | `ready` | `sessionId` | Both participants are connected. Create a fresh peer connection for this pairing. |
 | `description` | `sessionId`, `description: { type, sdp }` | Offer or answer from the paired participant. |
 | `candidate` | `sessionId`, `candidate` | ICE candidate, or `null` for end-of-candidates. |
@@ -53,8 +60,8 @@ Server events:
 
 Clients send `description` and `candidate` with the **exact `sessionId` from the
 latest `ready` event**. Forwarded messages retain that identifier. Each new pairing
-gets a fresh random identifier, including reconnects with the same participant
-tokens. The server rejects missing/old identifiers, so delayed packets cannot
+gets a fresh random identifier, including reconnects with the rotated participant
+token. The server rejects missing/old identifiers, so delayed packets cannot
 reach a replacement peer connection. Clients must also ignore incoming messages
 from retired pairings and guard asynchronous callbacks from retired peers.
 

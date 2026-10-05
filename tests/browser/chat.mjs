@@ -73,7 +73,8 @@ async function pageForDevice(time = Date.now()) {
         super(...args); window.chatTestPeers.push(this);
         this.addEventListener('datachannel', event => window.chatTestChannels.push(event.channel));
       }
-      createDataChannel(...args) { const channel = super.createDataChannel(...args); window.chatTestChannels.push(channel); return channel; }
+      // Only chat channels; the negotiated verification channel is exercised separately.
+      createDataChannel(...args) { const channel = super.createDataChannel(...args); if (channel.label === 'chat-v1') window.chatTestChannels.push(channel); return channel; }
     };
   });
   return page;
