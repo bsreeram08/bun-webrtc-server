@@ -24,6 +24,12 @@ void main() {
   late FakeChatCrypto mine, theirs;
   late List<String> acks, notices;
   late List<Map<String, dynamic>> posted;
+  // Payload types of what was posted (FakeChatCrypto envelopes are readable JSON). A session's first send also
+  // carries the rotation policy, as on the web, so assertions look at message payloads.
+  List<String> postedTypes() => [
+    for (final item in posted)
+      (jsonDecode(jsonDecode(utf8.decode(base64Url.decode(base64Url.normalize(item['envelope'] as String))))['p'] as String) as Map)['type'] as String,
+  ];
   late List<http.Request> requests;
   var published = aliceIdentity;
   Map<String, dynamic>? serverIdentity;
@@ -140,7 +146,7 @@ void main() {
     expect((await store.list(conversation)).last.status, MessageStatus.queued);
     await mine.acceptChange('alice-id');
     await messenger.flush();
-    expect(posted, hasLength(1));
+    expect(postedTypes().where((t) => t == 'message'), hasLength(1));
     expect((await store.list(conversation)).last.status, MessageStatus.sent);
   });
 
@@ -192,13 +198,72 @@ void main() {
       expect(uploads.single['identity'], {'dh': 'me-dh', 'sign': 'me-sign'});
       expect(uploads.single['oneTimePreKeys'], hasLength(100));
       await Future<void>.delayed(const Duration(milliseconds: 50));
-      expect(posted, hasLength(1));
+      expect(postedTypes().where((t) => t == 'message'), hasLength(1));
     });
 
     test('a first device with no published identity becomes active and uploads', () async {
       serverIdentity = null;
       expect(await messenger.checkActive(), isTrue);
       expect(uploads.single['oneTimePreKeys'], hasLength(100));
+    });
+  });
+
+  group('chat key rotation (account.js parity)', () {
+    Map<String, Object?> rotateFrom(String reason) => {'v': 1, 'type': 'rotate', 'id': const Uuid().v4(), 'reason': reason};
+    Map<String, Object?> policy(int ms) => {'v': 1, 'type': 'policy', 'id': const Uuid().v4(), 'rotateEveryMs': ms};
+
+    test("a peer's reset commits with rotate (the core keeps only the new session) and answers with our policy", () async {
+      await deliver(await envelopeFrom(theirs, message('hi')));
+      posted.clear();
+      await deliver(await envelopeFrom(theirs, rotateFrom('manual')), id: 'env2');
+      expect(mine.rotateCommits, hasLength(1));
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(notices, contains('🔄 Secure session reset by alice'));
+      expect(postedTypes(), contains('policy'));
+      expect(acks, contains('env2'));
+    });
+
+    test('an unaccepted new identity can neither reset the session nor set a policy', () async {
+      await deliver(await envelopeFrom(theirs, message('first')));
+      final impostor = FakeChatCrypto(me: const Identity(dh: 'new-dh', sign: 'new-sign'));
+      published = const Identity(dh: 'new-dh', sign: 'new-sign');
+      await deliver(await envelopeFrom(impostor, rotateFrom('manual')), id: 'env2');
+      await deliver(await envelopeFrom(impostor, policy(86400000)), id: 'env3');
+      expect(mine.rotateCommits, isEmpty);
+      expect(messenger.rotation.peer('alice-id'), 0);
+    });
+
+    test('the shorter non-off interval wins, unknown values are ignored, and policy changes are rate-limited', () async {
+      expect(rotationInterval(86400000, 604800000), 86400000);
+      expect(rotationInterval(0, 2592000000), 2592000000);
+      expect(rotationInterval(12345, 0), 0);
+      await deliver(await envelopeFrom(theirs, policy(604800000)));
+      expect(messenger.rotation.peer('alice-id'), 604800000);
+      await deliver(await envelopeFrom(theirs, policy(12345)), id: 'env2');
+      expect(messenger.rotation.peer('alice-id'), 604800000, reason: 'unknown values are never trusted');
+      await messenger.setMyRotation(86400000);
+      expect(messenger.effectiveRotation('alice-id'), 86400000, reason: 'mine is shorter');
+    });
+
+    test('a due session rotates before the next message, and a manual reset sends a rotate payload', () async {
+      await messenger.setMyRotation(86400000);
+      mine.sessions['alice-id'] = SessionInfo(sid: 'old', startedAt: DateTime.now().millisecondsSinceEpoch - 2 * 86400000);
+      await messenger.send(alice, 'after a day');
+      await Future<void>.delayed(const Duration(milliseconds: 50)); // send() starts the flush.
+      expect(mine.rotations, ['alice-id']);
+      expect(postedTypes().indexOf('rotate'), lessThan(postedTypes().indexOf('message')), reason: 'rotate first, then the message on the new session');
+      posted.clear();
+      await messenger.resetSession(alice);
+      expect(postedTypes().first, 'rotate');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(notices, contains('🔄 Secure session reset by you'));
+    });
+
+    test('regenerating the identity uploads a full key set under a new identity', () async {
+      final before = await mine.identity();
+      await messenger.regenerateIdentity();
+      expect(uploads.last['identity'], isNot(before.toJson()));
+      expect(uploads.last['oneTimePreKeys'], hasLength(100));
     });
   });
 }

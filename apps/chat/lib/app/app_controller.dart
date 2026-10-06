@@ -7,13 +7,14 @@ import 'package:passkeys/authenticator.dart';
 import 'package:passkeys/types.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite/sqflite.dart';
 
 import '../calls/call_controller.dart';
 import '../core/api.dart';
 import '../core/events.dart';
 import '../crypto/chat_crypto.dart';
-import '../crypto/fake_chat_crypto.dart';
+import '../crypto/rust_chat_crypto.dart';
 import '../messaging/messenger.dart';
 import '../store/message_store.dart';
 import '../theme/theme_prefs.dart';
@@ -60,8 +61,42 @@ final pushEnabledProvider = Provider<bool>((ref) => true);
 final passkeysProvider = Provider<PasskeyClient>((ref) => PlatformPasskeys());
 final tokenStoreProvider = Provider<TokenStore>((ref) => SecureTokenStore());
 
-/// TODO(integration): replace with the flutter_rust_bridge binding of crates/chatcore.
-final cryptoProvider = Provider<ChatCrypto>((ref) => FakeChatCrypto());
+/// The Rust core (crates/chatcore) through flutter_rust_bridge. Tests and the demo override this
+/// with FakeChatCrypto.
+final cryptoProvider = Provider<ChatCrypto>((ref) => RustChatCrypto());
+
+/// Rotation settings for an account on this device (account.js `rotation-*` keys in localStorage).
+final rotationPrefsProvider = Provider<Future<RotationPrefs> Function(String userId)>((ref) => (userId) async {
+  final prefs = await SharedPreferences.getInstance();
+  return SharedRotationPrefs(prefs, userId);
+});
+
+class SharedRotationPrefs implements RotationPrefs {
+  SharedRotationPrefs(this._prefs, this._user);
+  final SharedPreferences _prefs;
+  final String _user;
+  String get _mineKey => 'rotation-v1:$_user';
+  String _peerKey(String id) => 'rotation-peer-v1:$_user:$id';
+  String _toldKey(String id) => 'rotation-told-v1:$_user:$id';
+  @override
+  int get mine => _prefs.getInt(_mineKey) ?? 0;
+  @override
+  set mine(int value) => _prefs.setInt(_mineKey, value);
+  @override
+  int peer(String contactId) => _prefs.getInt(_peerKey(contactId)) ?? 0;
+  @override
+  void setPeer(String contactId, int value) => _prefs.setInt(_peerKey(contactId), value);
+  @override
+  String? told(String contactId) => _prefs.getString(_toldKey(contactId));
+  @override
+  void setTold(String contactId, String value) => _prefs.setString(_toldKey(contactId), value);
+  @override
+  void clearTold() {
+    for (final key in _prefs.getKeys().where((k) => k.startsWith('rotation-told-v1:$_user:')).toList()) {
+      _prefs.remove(key);
+    }
+  }
+}
 
 /// Opens the per-account message database.
 final storeOpenerProvider = Provider<Future<MessageStore> Function(String userId)>((ref) => (userId) async {
@@ -199,6 +234,7 @@ class AppController extends Notifier<AppState> {
       mutualContacts: () => state.contacts.where((c) => c.state == ContactState.mutual && c.id != null).toList(),
       ack: events.ack,
       viewing: () => viewingContact,
+      rotation: await ref.read(rotationPrefsProvider)(user.id),
     );
     messenger = m;
     _subscriptions
@@ -267,6 +303,18 @@ class AppController extends Notifier<AppState> {
     } catch (e) {
       state = state.copyWith(notice: 'Could not check encryption keys: $e');
     }
+  }
+
+  /// Conversation ⋯ → Reset secure session.
+  Future<void> resetSession(Contact contact) async => messenger!.resetSession(contact);
+
+  /// Settings → Security: this device's rotation interval (ms, 0 = off).
+  Future<void> setRotation(int value) async => messenger?.setMyRotation(value);
+
+  /// Settings → Security: new identity keys (explicit; contacts see a security-code change).
+  Future<void> regenerateIdentity() async {
+    await messenger?.regenerateIdentity();
+    state = state.copyWith(inactiveDevice: false);
   }
 
   /// "Use this device instead": only ever from the user's tap.

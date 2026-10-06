@@ -126,6 +126,24 @@ class SasCommitment {
   final String hash;
 }
 
+/// The active session with a contact (for scheduled rotation).
+class SessionInfo {
+  const SessionInfo({required this.sid, required this.startedAt});
+  final String sid;
+
+  /// Unix milliseconds.
+  final int startedAt;
+}
+
+/// Chat key rotation schedule choices (signal.js `ROTATION_CHOICES`), in milliseconds.
+const rotationChoices = [0, 86400000, 604800000, 2592000000];
+
+/// The shorter non-off interval of the two sides wins; unknown values are ignored (0 = off).
+int rotationInterval(int mine, int theirs) {
+  final set = [mine, theirs].where((v) => v > 0 && rotationChoices.contains(v));
+  return set.isEmpty ? 0 : set.reduce((a, b) => a < b ? a : b);
+}
+
 abstract class ChatCrypto {
   /// Opens (or creates) the key store for the signed-in account.
   Future<void> init(String dbPath);
@@ -154,7 +172,22 @@ abstract class ChatCrypto {
   });
 
   /// Advances the ratchet for a decrypted message once it has been stored.
-  Future<void> commit(String commitId);
+  /// [rotate] is true when the stored payload was the peer's `{type:'rotate'}`
+  /// session reset: the core then keeps only the new session (signal.js `{ rotate: true }`).
+  Future<void> commit(String commitId, {bool rotate = false});
+
+  /// Drops a pending decrypt (e.g. storing it failed); redelivery processes it again.
+  Future<void> abort(String commitId);
+
+  // ---- Chat key rotation ----
+  /// The next message to this contact opens a fresh session (new handshake).
+  /// The pinned identity (security code) is untouched.
+  Future<void> rotate(String contactId);
+  Future<SessionInfo?> sessionInfo(String contactId);
+
+  /// A new identity for this device (explicit user action only). Contacts see a
+  /// security-code change; upload it with takeover semantics afterwards.
+  Future<void> resetIdentity();
 
   /// Records an identity seen from the server (key-change events). A
   /// different identity than the pinned one is flagged and blocks sending.

@@ -1,0 +1,22 @@
+PODS:
+  - chatcore_bridge (0.0.1):
+    - FlutterMacOS
+  - FlutterMacOS (1.0.0)
+
+DEPENDENCIES:
+  - chatcore_bridge (from `Flutter/ephemeral/.symlinks/plugins/chatcore_bridge/macos`)
+  - FlutterMacOS (from `Flutter/ephemeral`)
+
+EXTERNAL SOURCES:
+  chatcore_bridge:
+    :path: Flutter/ephemeral/.symlinks/plugins/chatcore_bridge/macos
+  FlutterMacOS:
+    :path: Flutter/ephemeral
+
+SPEC CHECKSUMS:
+  chatcore_bridge: 230cbe002df1458e919cf3b39e68b69db8562781
+  FlutterMacOS: c232990155153907050900a2e175c7773903ba4e
+
+PODFILE CHECKSUM: 1e95c36afbfd1cb6423ceca4de7a8e1b256fb6ac
+
+COCOAPODS: 1.16.2

@@ -13,7 +13,10 @@ import 'sas.dart';
 class FakeChatCrypto implements ChatCrypto {
   FakeChatCrypto({this.me = const Identity(dh: 'fake-dh', sign: 'fake-sign')});
 
-  final Identity me;
+  Identity me;
+  final Map<String, SessionInfo> sessions = {};
+  final List<String> rotations = [];
+  final List<String> rotateCommits = [];
   final Map<String, _Peer> _peers = {};
   final Map<String, String> _pending = {};
   final Set<String> committed = {};
@@ -45,6 +48,7 @@ class FakeChatCrypto implements ChatCrypto {
       await notePeer(contactId, Identity.fromJson(bundle['identity'] as Map<String, dynamic>));
     }
     if (_peers[contactId]!.blocked) return const IdentityBlocked();
+    sessions.putIfAbsent(contactId, () => SessionInfo(sid: 'sent-$contactId', startedAt: DateTime.now().millisecondsSinceEpoch));
     return Encrypted(base64Url.encode(utf8.encode(jsonEncode({'fake': 1, 'from': me.toJson(), 'p': plaintextJson}))).replaceAll('=', ''));
   }
 
@@ -78,8 +82,30 @@ class FakeChatCrypto implements ChatCrypto {
   }
 
   @override
-  Future<void> commit(String commitId) async {
-    if (_pending.remove(commitId) != null) committed.add(commitId);
+  Future<void> commit(String commitId, {bool rotate = false}) async {
+    final contact = _pending.remove(commitId);
+    if (contact == null) return;
+    committed.add(commitId);
+    sessions.putIfAbsent(contact, () => SessionInfo(sid: 's$commitId', startedAt: DateTime.now().millisecondsSinceEpoch));
+    if (rotate) rotateCommits.add(commitId);
+  }
+
+  @override
+  Future<void> abort(String commitId) async => _pending.remove(commitId);
+
+  @override
+  Future<void> rotate(String contactId) async {
+    rotations.add(contactId);
+    sessions[contactId] = SessionInfo(sid: 'r${rotations.length}', startedAt: DateTime.now().millisecondsSinceEpoch);
+  }
+
+  @override
+  Future<SessionInfo?> sessionInfo(String contactId) async => sessions[contactId];
+
+  @override
+  Future<void> resetIdentity() async {
+    me = Identity(dh: 'fake-dh-${_random.nextInt(1 << 31)}', sign: 'fake-sign');
+    sessions.clear();
   }
 
   @override

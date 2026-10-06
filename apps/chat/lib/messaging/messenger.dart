@@ -15,6 +15,34 @@ import '../store/message_store.dart';
 /// web client's account.js receive/send path: decrypt, validate, store, then
 /// acknowledge and commit the ratchet; encrypted delivery receipts; burn; and a
 /// queue that sends oldest first and pauses on a changed security code.
+/// Per-account rotation settings on this device (web: localStorage `rotation-*`).
+abstract class RotationPrefs {
+  int get mine;
+  set mine(int value);
+  int peer(String contactId);
+  void setPeer(String contactId, int value);
+  String? told(String contactId);
+  void setTold(String contactId, String value);
+  void clearTold();
+}
+
+class MemoryRotationPrefs implements RotationPrefs {
+  @override
+  int mine = 0;
+  final Map<String, int> peers = {};
+  final Map<String, String> _told = {};
+  @override
+  int peer(String contactId) => peers[contactId] ?? 0;
+  @override
+  void setPeer(String contactId, int value) => peers[contactId] = value;
+  @override
+  String? told(String contactId) => _told[contactId];
+  @override
+  void setTold(String contactId, String value) => _told[contactId] = value;
+  @override
+  void clearTold() => _told.clear();
+}
+
 class Messenger {
   Messenger({
     required this.api,
@@ -25,7 +53,11 @@ class Messenger {
     required this.mutualContacts,
     required this.ack,
     this.viewing,
-  });
+    RotationPrefs? rotation,
+  }) : rotation = rotation ?? MemoryRotationPrefs();
+
+  /// Chat key rotation settings (account.js `rotation-*`).
+  final RotationPrefs rotation;
 
   final Api api;
   final ChatCrypto crypto;
@@ -108,7 +140,7 @@ class Messenger {
     String? failureCode;
     var failed = false;
     String? receipt;
-    var burned = false;
+    var burned = false, rotated = false;
     try {
       Identity? published;
       final decrypted = await crypto.decryptFrom(event.fromId, event.envelope);
@@ -128,6 +160,11 @@ class Messenger {
       // An unaccepted new identity may deliver (flagged) messages, but may not burn history or fake receipts.
       if (!untrusted || payload['type'] == 'message') {
         switch (payload['type']) {
+          case 'rotate':
+            // The core keeps only the peer's new session, in the same write as the ratchet (commit below).
+            rotated = true;
+          case 'policy':
+            _rememberPeerRotation(event.fromId, payload['rotateEveryMs'] as int);
           case 'receipt':
             await store.setStatus(conversationId, payload['id'] as String, MessageStatus.delivered);
           case 'burn':
@@ -141,7 +178,7 @@ class Messenger {
             }
         }
       }
-      await crypto.commit(decrypted.commitId);
+      await crypto.commit(decrypted.commitId, rotate: rotated);
     } on CryptoException catch (error) {
       failed = true;
       failureCode = error.code;
@@ -162,6 +199,12 @@ class Messenger {
     ack(event.id);
     final notice = noticeText(outcome.notice, event.fromUsername);
     if (notice != null) _notices.add(notice);
+    if (rotated && !failed) {
+      _notices.add('🔄 Secure session reset by ${event.fromUsername}');
+      final contact = contactById(event.fromId);
+      // Our policy rides on the new session, which also lets the peer drop its old chains.
+      if (contact != null) unawaited(_tellPolicy(contact).catchError((_) {}));
+    }
     if (burned) {
       unread.remove(event.fromId);
       _notices.add('${event.fromUsername} burned your conversation. It was deleted on this device.');
@@ -185,7 +228,10 @@ class Messenger {
       throw const CryptoException('Invalid message', code: 'invalid');
     }
     final type = decoded['type'], size = decoded.length;
-    final ok = ((type == 'receipt' || type == 'burn') && size == 3) || (type == 'message' && size == 6);
+    final ok = ((type == 'receipt' || type == 'burn') && size == 3) ||
+        (type == 'message' && size == 6) ||
+        (type == 'rotate' && size == 4 && (decoded['reason'] == 'manual' || decoded['reason'] == 'scheduled')) ||
+        (type == 'policy' && size == 4 && decoded['rotateEveryMs'] is int && (decoded['rotateEveryMs'] as int) >= 0);
     if (!ok) throw const CryptoException('Invalid message', code: 'invalid');
     return decoded;
   }
@@ -242,8 +288,14 @@ class Messenger {
       final queued = await store.queued();
       for (final contact in mutualContacts()) {
         final conversationId = conversationWith(contact.id!);
+        var prepared = false;
         for (final record in queued.where((m) => m.conversationId == conversationId)) {
           try {
+            if (!prepared) {
+              await _rotateIfDue(contact);
+              await _tellPolicy(contact);
+              prepared = true;
+            }
             await _sendControl(contact, {
               'v': 1,
               'type': 'message',
@@ -284,6 +336,68 @@ class Messenger {
     await store.removeConversation(conversationWith(contact.id!));
     unread.remove(contact.id);
     _unread.add(Map.of(unread));
+  }
+
+  // ---------- Chat key rotation ----------
+  // Sessions (ratchets) rotate; identities do not rotate on a timer — that would make security-code
+  // changes routine and teach people to ignore them. Each side picks an interval; a chat uses the shorter.
+  final Map<String, List<int>> _policyChanges = {};
+
+  /// A contact's interval: only known choices, and at most ten changes a minute from any contact.
+  void _rememberPeerRotation(String contactId, int value) {
+    if (!rotationChoices.contains(value) || rotation.peer(contactId) == value) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final changes = (_policyChanges[contactId] ?? []).where((t) => now - t < 60000).toList();
+    if (changes.length >= 10) return;
+    _policyChanges[contactId] = [...changes, now];
+    rotation.setPeer(contactId, value);
+  }
+
+  int effectiveRotation(String contactId) => rotationInterval(rotation.mine, rotation.peer(contactId));
+
+  /// Starts fresh session keys with a new handshake; the security code is untouched.
+  Future<void> resetSession(Contact contact, {String reason = 'manual'}) async {
+    if (!active) throw const CryptoException('Encrypted messaging for this account is active on another device or browser.');
+    await crypto.rotate(contact.id!);
+    await _sendControl(contact, {'v': 1, 'type': 'rotate', 'id': const Uuid().v4(), 'reason': reason});
+    _notices.add(reason == 'manual' ? '🔄 Secure session reset by you' : '🔄 Keys rotated on schedule');
+    await _tellPolicy(contact);
+  }
+
+  Future<void> _rotateIfDue(Contact contact) async {
+    final interval = effectiveRotation(contact.id!);
+    if (interval == 0) return;
+    final info = await crypto.sessionInfo(contact.id!);
+    if (info != null && DateTime.now().millisecondsSinceEpoch - info.startedAt >= interval) {
+      await resetSession(contact, reason: 'scheduled');
+    }
+  }
+
+  /// Tells a contact our interval once per session, and again whenever it changes.
+  Future<void> _tellPolicy(Contact contact, {bool force = false}) async {
+    final mine = rotation.mine;
+    final info = await crypto.sessionInfo(contact.id!);
+    if (!force && info != null && rotation.told(contact.id!) == '$mine|${info.sid}') return;
+    await _sendControl(contact, {'v': 1, 'type': 'policy', 'id': const Uuid().v4(), 'rotateEveryMs': mine});
+    final after = await crypto.sessionInfo(contact.id!);
+    rotation.setTold(contact.id!, '$mine|${after?.sid}');
+  }
+
+  /// Settings → Security: this device's interval (0 = off); contacts with a session hear about it.
+  Future<void> setMyRotation(int value) async {
+    if (!rotationChoices.contains(value)) return;
+    rotation.mine = value;
+    if (!active) return;
+    for (final contact in mutualContacts()) {
+      if (await crypto.sessionInfo(contact.id!) != null) unawaited(_tellPolicy(contact, force: true).catchError((_) {}));
+    }
+  }
+
+  /// Settings → Security: new identity keys for this device (explicit only). Contacts see a code change.
+  Future<void> regenerateIdentity() async {
+    await crypto.resetIdentity();
+    rotation.clearTold();
+    await takeOver();
   }
 
   Future<void> dispose() async {

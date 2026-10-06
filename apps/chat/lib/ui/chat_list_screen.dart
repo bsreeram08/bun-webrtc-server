@@ -10,6 +10,7 @@ import '../app/app_controller.dart';
 import '../core/api.dart';
 import '../core/pair_id.dart';
 import '../store/message.dart';
+import 'security_settings.dart';
 import 'theme_picker.dart';
 import 'widgets/common.dart';
 
@@ -126,6 +127,7 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
             onSelected: (value) => switch (value) {
               'invite' => _guard(_invite),
               'theme' => showThemePicker(context, ref),
+              'security' => showSecuritySettings(context, ref),
               'signout' => app.signOut(),
               'signout-all' => app.signOut(everywhere: true),
               _ => null,
@@ -133,6 +135,7 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
             itemBuilder: (_) => const [
               PopupMenuItem(value: 'invite', child: Text('Invite someone')),
               PopupMenuItem(value: 'theme', child: Text('Appearance')),
+              PopupMenuItem(value: 'security', child: Text('Security')),
               PopupMenuItem(value: 'signout', child: Text('Sign out')),
               PopupMenuItem(value: 'signout-all', child: Text('Sign out everywhere')),
             ],

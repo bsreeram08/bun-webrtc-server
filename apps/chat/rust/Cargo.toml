@@ -1,0 +1,17 @@
+[package]
+name = "chatcore_bridge"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "flutter_rust_bridge surface over crates/chatcore for the Flutter app"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+chatcore = { path = "../../../crates/chatcore" }
+flutter_rust_bridge = "=2.13.0"
+serde_json = { version = "=1.0.140", features = ["preserve_order"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }

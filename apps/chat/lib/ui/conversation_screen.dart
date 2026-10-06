@@ -68,6 +68,29 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
     }
   }
 
+  Future<void> _resetSession(Contact contact) async {
+    final yes = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Reset the secure session?'),
+        content: Text('Both devices drop this chat\'s current keys and start fresh ones. Your security code with ${contact.username} stays the same.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Reset')),
+        ],
+      ),
+    );
+    if (yes != true) return;
+    try {
+      await _app.resetSession(contact);
+      if (mounted) showSnack(context, 'Secure session reset. New keys are in use for this chat.');
+    } on CryptoException catch (e) {
+      if (mounted) showSnack(context, e.code == 'identity-blocked' ? "${contact.username}'s security code changed. Review it before resetting." : 'Could not reset: ${e.message}');
+    } catch (e) {
+      if (mounted) showSnack(context, 'Could not reset: $e');
+    }
+  }
+
   Future<void> _burn(Contact contact) async {
     final yes = await showDialog<bool>(
       context: context,
@@ -153,11 +176,13 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
                 'safety' => _openSafety(contact),
                 'theme' => showThemePicker(context, ref, chatId: _conversationId),
                 'burn' => _burn(contact),
+                'reset' => _resetSession(contact),
                 _ => null,
               },
               itemBuilder: (_) => const [
                 PopupMenuItem(value: 'safety', child: Text('Security code')),
                 PopupMenuItem(value: 'theme', child: Text('Chat theme')),
+                PopupMenuItem(value: 'reset', child: Text('Reset secure session')),
                 PopupMenuItem(value: 'burn', child: Text('Burn conversation')),
               ],
             ),
