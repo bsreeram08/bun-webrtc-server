@@ -71,6 +71,17 @@ describe('prekey directory', () => {
         expect(((await (await request('/api/keys/count', 'GET', bob.cookie)).json()) as any).oneTimePreKeys).toBe(1);
         watch.socket.close();
     });
+    test('the prekey count shows which identity is active, and the account\'s other devices hear when it moves', async () => {
+        const bob = user('bob'), first = keys(3);
+        await request('/api/keys', 'PUT', bob.cookie, first);
+        expect(((await (await request('/api/keys/count', 'GET', bob.cookie)).json()) as any).identity).toEqual(first.identity);
+        const other = events(bob.cookie); await other.opened; await other.next('hello');
+        const moved = keys(1, 50);
+        await request('/api/keys', 'PUT', bob.cookie, moved);
+        expect(await other.next('keys')).toEqual({ type: 'keys', id: bob.id });
+        expect(((await (await request('/api/keys/count', 'GET', bob.cookie)).json()) as any).identity).toEqual(moved.identity);
+        other.socket.close();
+    });
     test('the username "count" is reserved for the prekey count route', async () => {
         const response = await request('/api/register/options', 'POST', '', { invite: 'A'.repeat(22), username: 'count' });
         expect(response.status).toBe(400);

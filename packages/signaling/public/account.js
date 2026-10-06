@@ -93,13 +93,33 @@
     try { await publishKeys(); } catch (error) { say('chats-status', `Could not publish encryption keys: ${error.message}`); }
     return true;
   }
-  async function publishKeys() {
+  /** One device per account holds messaging. Another device or browser (e.g. Safari vs the Home Screen app)
+   *  never replaces it silently: it stays inactive (sends nothing, acknowledges nothing) until the user moves
+   *  messaging here, so envelopes meant for the active device are never consumed by one that cannot read them. */
+  let inactive = false;
+  function setInactive(value) {
+    inactive = value; $('device-banner').hidden = !value;
+    if (value) { say('chats-status', ''); if (current) App.chatStatus('Messaging is active on another device. Use this device from the chat list to send here.'); }
+  }
+  async function publishKeys(takeover = false) {
     if (!box || !me) return;
     const keys = await box.prekeys(), count = await api('/api/keys/count');
-    const upload = { identity: keys.identity, signedPreKey: keys.signedPreKey };
-    if (count.oneTimePreKeys < 20 || count.signedPreKeyId === null) upload.oneTimePreKeys = await box.oneTimePreKeys(100 - Math.min(count.oneTimePreKeys, 100) || 100);
-    if (upload.oneTimePreKeys || keys.rotated || count.signedPreKeyId !== keys.signedPreKey.id) await api('/api/keys', 'PUT', upload);
+    const mine = count.identity, here = keys.identity;
+    const other = Boolean(mine && (mine.dh !== here.dh || mine.sign !== here.sign));
+    if (other && !takeover) { setInactive(true); return; }
+    setInactive(false);
+    const upload = { identity: here, signedPreKey: keys.signedPreKey };
+    // Taking over replaces the identity, and the server drops the previous device's prekeys with it.
+    if (other || count.oneTimePreKeys < 20 || count.signedPreKeyId === null) upload.oneTimePreKeys = await box.oneTimePreKeys(other ? 100 : 100 - Math.min(count.oneTimePreKeys, 100) || 100);
+    if (other || upload.oneTimePreKeys || keys.rotated || count.signedPreKeyId !== keys.signedPreKey.id) await api('/api/keys', 'PUT', upload);
+    if (other) flushOutgoing();
   }
+  $('device-takeover').onclick = async () => {
+    $('device-takeover').disabled = true;
+    try { await publishKeys(true); say('chats-status', 'Messaging moved to this device. Your contacts will see that your security code changed.'); }
+    catch (error) { say('chats-status', `Could not move messaging here: ${error.message}`); }
+    finally { $('device-takeover').disabled = false; }
+  };
   async function rememberFlag(id) {
     flagged.add(id);
     await flagged.store?.put('flagged', [...flagged].slice(-500));
@@ -121,6 +141,7 @@
       else if (message.type === 'contacts') loadContacts();
       else if (message.type === 'incoming') incoming(message);
       else if (message.type === 'envelope') inbound = inbound.then(() => receiveEnvelope(socket, message)).catch(() => {});
+      else if (message.type === 'keys' && message.id === me?.id) publishKeys().catch(() => {}); // Another device took over messaging.
       else if (message.type === 'keys') checkIdentity(message.id).then(flushOutgoing).catch(() => {});
       else if (message.type === 'ended' && ringing?.roomId === message.roomId) { const ring = ringing; ringing = null; hideRing(); say('chats-status', `Missed ${ring.kind} call from ${ring.contact.username} · ${clock(Date.now())}`); }
     };
@@ -148,6 +169,7 @@
   const attempts = new Map();
   async function receiveEnvelope(socket, message) {
     if (!await ready || !box) return; // Unacknowledged: redelivered once this device can decrypt.
+    if (inactive) return; // Meant for the active device: never decrypt-fail and acknowledge it away.
     const from = message.from, conversationId = await pairId(from.id), viewing = () => body.dataset.screen === 'conversation' && current?.id === from.id;
     let receipt = null, burned = false, failure = null;
     try {
@@ -185,7 +207,7 @@
     const notice = {
       'storage-full': `A message from ${from.username} was discarded: this device holds 2,000 messages. Clear some history to receive more.`,
       'conversation-full': `A message from ${from.username} was discarded: this conversation holds 500 incoming messages. Burn or clear it to receive more from them.`,
-      invalid: `A message from ${from.username} was invalid or did not match their published security code, and was discarded.`,
+      invalid: `A message from ${from.username} could not be verified and was discarded. If they use more than one browser or device (for example Safari and the Home Screen app), ask them to use the one where messaging is active.`,
       'gave-up': `A message from ${from.username} could not be saved after several tries and was discarded.`,
       undecryptable: `A message from ${from.username} could not be decrypted and was discarded.`,
     }[outcome.notice];
@@ -210,7 +232,7 @@
   }
   /** Encrypts and posts every queued outgoing message, oldest first, one contact at a time. */
   async function flushOutgoing() {
-    if (!me || !await ready || !box) return;
+    if (!me || !await ready || !box || inactive) return;
     if (flushing) { flushAgain = true; return; }
     flushing = true; flushAgain = false; clearTimeout(flushTimer);
     let retryLater = false;

@@ -184,6 +184,8 @@ export function createAccounts(options: { db: Database; origin: string; now: () 
         } catch { return json({ error: `At most ${MAX_PREKEYS} one-time prekeys may wait on the server.` }, 400); }
         // Contacts re-check this identity; a change shows them a security-code notice.
         if (changed || !existing) for (const contact of mutualIds(user.id)) notify(contact, { type: 'keys', id: user.id });
+        // This account's other devices learn that messaging moved away from them.
+        if (changed) notify(user.id, { type: 'keys', id: user.id });
         return json({ oneTimePreKeys: prekeyCount(user.id), changed });
     }
     /** Sends waiting envelopes in order, bounded by in-flight count and socket buffering. */
@@ -352,7 +354,9 @@ export function createAccounts(options: { db: Database; origin: string; now: () 
         if (path === '/api/keys' && request.method === 'PUT') return uploadKeys(user, await readBody(request));
         if (path === '/api/keys/count' && request.method === 'GET') {
             const spk = db.query<{ key_id: number }, [string]>('SELECT key_id FROM signed_prekeys WHERE user_id = ?').get(user.id);
-            return json({ oneTimePreKeys: prekeyCount(user.id), signedPreKeyId: spk?.key_id ?? null });
+            // The account's published identity lets a device tell whether it is the one messaging is active on.
+            const identity = db.query<{ dh: string; sign: string }, [string]>('SELECT dh, sign FROM identity_keys WHERE user_id = ?').get(user.id);
+            return json({ oneTimePreKeys: prekeyCount(user.id), signedPreKeyId: spk?.key_id ?? null, identity: identity ? { dh: identity.dh, sign: identity.sign } : null });
         }
         const keysMatch = /^\/api\/keys\/([a-z0-9_]{3,20})(\/identity)?$/.exec(path);
         if (keysMatch && request.method === 'GET') {

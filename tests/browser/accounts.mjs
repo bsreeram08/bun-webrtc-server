@@ -119,6 +119,11 @@ try {
   // Key change: bob's device loses its keys (a reinstall). Alice verified him, so sending pauses.
   await bob.evaluate(async () => { const id = (await (await fetch('/api/me')).json()).user.id; await new Promise(done => { const request = indexedDB.deleteDatabase(`webrtc-bun-signal-v1-${id}`); request.onsuccess = request.onerror = request.onblocked = done; }); });
   await bob.reload(); await visible(bob, '#chats');
+  // A device with new keys never takes over silently: it stays inactive until bob chooses it.
+  await bob.waitForFunction(() => !document.getElementById('device-banner').hidden, null, { timeout: 15000 });
+  await bob.click('#device-takeover');
+  await bob.waitForFunction(() => document.getElementById('device-banner').hidden, null, { timeout: 15000 });
+  step('a device with new keys stayed inactive until the user moved messaging to it');
   await alice.waitForFunction(() => !document.getElementById('key-banner').hidden, null, { timeout: 15000 });
   if (!(await alice.textContent('#key-banner-text')).includes('Sending is paused')) throw new Error('Verified contact was not blocked after a key change');
   await shot(alice, 'e2e-3-key-change');

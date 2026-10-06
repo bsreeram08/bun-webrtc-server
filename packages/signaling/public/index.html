@@ -88,6 +88,11 @@
       <p id="notify-banner-text">Get notified about messages and calls, even when this app is closed.</p>
       <div class="notify-actions"><button id="notify-enable" class="primary" type="button">Turn on</button><button id="notify-dismiss" class="link" type="button">Not now</button></div>
     </div>
+    <div id="device-banner" class="notify-banner" role="alert" hidden>
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></svg>
+      <p>Encrypted messaging for this account is active on another device or browser. Messages are not sent or received here.</p>
+      <div class="notify-actions"><button id="device-takeover" class="primary" type="button">Use this device instead</button></div>
+    </div>
     <p id="chats-status" role="status" aria-live="polite"></p>
     <ul id="contact-list" aria-label="Chats"></ul>
     <p id="contacts-empty" class="empty">No contacts yet. Add someone by username, or invite them from the ⋯ menu.</p>
