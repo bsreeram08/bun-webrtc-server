@@ -294,3 +294,65 @@ describe('control payloads and key rotation', () => {
     expect(await store.list()).toHaveLength(0);
   });
 });
+
+describe('actions, polls and votes', () => {
+  const store = () => fixture().store as Store & { vote(conversationId: string, pollId: string, voter: string, option: number | null): Promise<boolean> };
+  const poll = (values: Record<string, unknown> = {}) => ({ v: 1, type: 'message', id: crypto.randomUUID(), text: '📊 Lunch?\n1. Pizza\n2. Sushi', createdAt: NOW, expiresAt: null, kind: 'poll', poll: { question: 'Lunch?', options: ['Pizza', 'Sushi'] }, ...values });
+  test('payload shapes: plain, action and poll messages and votes are exact; old shapes stay valid', () => {
+    const { store: s } = fixture(), id = crypto.randomUUID();
+    expect(s.checkPayload({ v: 1, type: 'message', id, text: 'hi', createdAt: NOW, expiresAt: null })).toBe('message');
+    expect(s.checkPayload({ v: 1, type: 'message', id, text: 'waves', createdAt: NOW, expiresAt: null, kind: 'action' })).toBe('message');
+    expect(s.checkPayload(poll())).toBe('message');
+    expect(s.checkPayload({ v: 1, type: 'vote', id, poll: crypto.randomUUID(), option: 1 })).toBe('vote');
+    expect(s.checkPayload({ v: 1, type: 'vote', id, poll: crypto.randomUUID(), option: null })).toBe('vote');
+    for (const bad of [
+      { v: 1, type: 'message', id, text: 'x', createdAt: NOW, expiresAt: null, kind: 'poll' }, // poll without poll data
+      { v: 1, type: 'message', id, text: 'x', createdAt: NOW, expiresAt: null, kind: 'action', extra: 1 },
+      { v: 1, type: 'message', id, text: 'x', createdAt: NOW, expiresAt: null, poll: {} }, // poll data without kind
+      { v: 1, type: 'vote', id, poll: 'nope', option: 1 },
+      { v: 1, type: 'vote', id, poll: crypto.randomUUID(), option: 10 },
+      { v: 1, type: 'vote', id, poll: crypto.randomUUID(), option: 1.5 },
+    ]) expect(() => s.checkPayload(bad)).toThrow();
+  });
+  test('polls are capped: 2–10 options of at most 200 characters; actions carry no poll', async () => {
+    const s = store();
+    expect(await s.receive(ROOM, poll())).toBe('stored');
+    for (const options of [['only'], Array.from({ length: 11 }, (_, index) => `o${index}`), ['a', 'x'.repeat(201)], ['a', '  '], ['a', 2]]) {
+      await expect(s.receive(ROOM, poll({ poll: { question: 'Q', options } }))).rejects.toMatchObject({ code: 'invalid' });
+    }
+    await expect(s.receive(ROOM, poll({ poll: { question: 'x'.repeat(201), options: ['a', 'b'] } }))).rejects.toMatchObject({ code: 'invalid' });
+    await expect(s.put({ id: crypto.randomUUID(), conversationId: ROOM, direction: 'outgoing', text: 'x', createdAt: NOW, status: 'queued', expiresAt: null, kind: 'action', poll: { question: 'Q', options: ['a', 'b'] } })).rejects.toThrow();
+    await expect(s.put({ id: crypto.randomUUID(), conversationId: ROOM, direction: 'outgoing', text: 'x', createdAt: NOW, status: 'queued', expiresAt: null, kind: 'sticker' })).rejects.toThrow();
+  });
+  test('votes: one per voter, changeable, tallied locally; unknown polls and options are ignored', async () => {
+    const s = store(), incoming = poll();
+    await s.receive(ROOM, incoming);
+    expect(await s.vote(ROOM, incoming.id, 'me', 1)).toBe(true);
+    expect(await s.vote(ROOM, incoming.id, 'peer', 0)).toBe(true);
+    expect(await s.vote(ROOM, incoming.id, 'me', 0)).toBe(true); // Changed vote.
+    expect(await s.vote(ROOM, incoming.id, 'peer', 5)).toBe(false);
+    expect(await s.vote(ROOM, crypto.randomUUID(), 'peer', 0)).toBe(false);
+    await expect(s.vote(ROOM, incoming.id, 'mallory', 0)).rejects.toMatchObject({ code: 'invalid' });
+    const [stored] = await s.list() as any[];
+    expect(stored.votes).toEqual({ me: 0, peer: 0 });
+    // A redelivered poll is a duplicate (votes never conflict) and keeps its tallies.
+    expect(await s.receive(ROOM, incoming)).toBe('duplicate');
+    expect(((await s.list()) as any[])[0].votes).toEqual({ me: 0, peer: 0 });
+    // Votes on a plain message do nothing.
+    const plain = { v: 1, type: 'message', id: crypto.randomUUID(), text: 'hi', createdAt: NOW + 1, expiresAt: null };
+    await s.receive(ROOM, plain);
+    expect(await s.vote(ROOM, plain.id, 'peer', 0)).toBe(false);
+  });
+  test('rich messages survive an encrypted backup round trip', async () => {
+    const s = store(), incoming = poll();
+    await s.receive(ROOM, incoming);
+    await s.vote(ROOM, incoming.id, 'me', 1);
+    await s.put({ id: crypto.randomUUID(), conversationId: ROOM, direction: 'outgoing', text: 'waves', createdAt: NOW + 5, status: 'delivered', expiresAt: null, kind: 'action' });
+    const backup = await s.exportBackup(PASSWORD);
+    const other = store();
+    expect(await other.importBackup(backup, PASSWORD)).toBe(2);
+    const restored = await other.list() as any[];
+    expect(restored.map(record => record.kind)).toEqual(['poll', 'action']);
+    expect(restored[0].votes).toEqual({ me: 1 });
+  });
+});

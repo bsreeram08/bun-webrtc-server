@@ -6,6 +6,7 @@ import { validateTurnUrl } from './config';
 import { createAccounts, openDatabase, type Accounts, type EventsConnection } from './accounts';
 import { createPush, type PushSend } from './push';
 import { nativeSenderFromEnv, type NativePlatform, type NativeSend } from './native-push';
+import { createEmoji, type Emoji, type Fetcher, type Resolver } from './emoji';
 
 type Participant = { digest: string; socket?: ServerWebSocket<Connection> };
 type Room = { id: string; expiresAt: number; participants: Participant[]; sessionId?: string; pair?: string[]; kind?: string };
@@ -38,6 +39,10 @@ export type SignalingOptions = {
     apps?: NativeApps;
     /** FCM/APNs transports for native apps (from the environment, or a test double). */
     nativePush?: { send: NativeSend; platforms: NativePlatform[] } | null;
+    /** Custom emoji import: extra allowed hosts (EMOJI_IMPORT_HOSTS) and test hooks for the fetch and DNS. */
+    emojiImportHosts?: string[];
+    emojiFetcher?: Fetcher;
+    emojiResolver?: Resolver;
 };
 export type NativeApps = { appleAppIds?: string[]; androidPackage?: string; androidCertSha256?: string[]; androidApkKeyHashes?: string[] };
 
@@ -144,11 +149,20 @@ export function startSignaling(options: SignalingOptions) {
             return waiting;
         },
     } });
+    const emoji: Emoji | undefined = db && options.dataDir ? createEmoji({ db, dataDir: options.dataDir, origin: options.origin, now, adminToken: options.adminToken, fetcher: options.emojiFetcher, resolver: options.emojiResolver, importHosts: options.emojiImportHosts }) : undefined;
     const server = Bun.serve({
         hostname: options.hostname ?? '127.0.0.1', port: options.port ?? 3000,
-        maxRequestBodySize: 131072, // Encrypted envelopes up to 64 KiB, base64url in JSON.
+        // Custom emoji uploads (512 KB images as base64) are the one larger body; everything else keeps 128 KiB.
+        maxRequestBodySize: 786432,
         fetch(request, server) {
             const url = new URL(request.url);
+            // Body limits are enforced on what is actually read: a body needs an exact Content-Length (no chunked
+            // transfer, which could run past a declared length), at most 128 KiB everywhere except an emoji upload.
+            if (request.method !== 'GET' && request.method !== 'HEAD' && (request.body || request.headers.has('transfer-encoding'))) {
+                const declared = request.headers.get('content-length'), cap = url.pathname === '/api/emoji' ? 786432 : 131072;
+                if (request.headers.has('transfer-encoding') || !declared || !/^\d{1,9}$/.test(declared)) return json({ error: 'Content-Length required' }, 411);
+                if (Number(declared) > cap) return json({ error: 'Request too large' }, 413);
+            }
             if (request.method === 'GET' && url.pathname === '/health') return json({ status: 'ok' });
             // Fetched by Apple's CDN and Google's verifier: exact JSON, no redirect, 404 until configured.
             if (request.method === 'GET' && (url.pathname === '/.well-known/apple-app-site-association' || url.pathname === '/.well-known/assetlinks.json')) {
@@ -158,17 +172,20 @@ export function startSignaling(options: SignalingOptions) {
             const source = requestSource(server.requestIP(request)?.address, request.headers, options.trustProxy);
             const requestOrigin = request.headers.get('origin');
             if (requestOrigin && requestOrigin !== options.origin) return json({ error: 'Origin denied' }, 403);
-            if (request.method === 'GET' && ['/', '/app.js', '/account.js', '/alerts.js', '/theme.js', '/wallpaper-circuit.svg', '/chat-store.js', '/signal.js', '/verify.js', '/vendor/simplewebauthn-browser.js', '/style.css', '/install.js', '/sw.js', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'].includes(url.pathname)) {
+            if (request.method === 'GET' && ['/', '/app.js', '/account.js', '/alerts.js', '/theme.js', '/commands.js', '/emoji.js', '/emoji-data.json', '/wallpaper-circuit.svg', '/chat-store.js', '/signal.js', '/verify.js', '/vendor/simplewebauthn-browser.js', '/style.css', '/install.js', '/sw.js', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'].includes(url.pathname)) {
                 const path = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
                 return new Response(Bun.file(new URL(`./public/${path}`, import.meta.url)), { headers: {
-                    'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; media-src 'self' blob:; img-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+                    'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; media-src 'self' blob:; img-src 'self' blob:; manifest-src 'self'; worker-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
                     'Permissions-Policy': 'camera=(self), microphone=(self), display-capture=()',
                     'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store',
                 } });
             }
+            // Custom emoji images are public, content-addressed and immutable: served like the fixed files.
+            if (request.method === 'GET' && url.pathname.startsWith('/emoji/')) return emoji?.serve(url) ?? json({ error: 'Not found' }, 404);
             // Fixed public files are not rate limited: two phones loading the app behind one home
             // router would otherwise spend the shared per-IP budget before their first API call.
             if (!allowRequest(source)) return json({ error: 'Rate limited' }, 429);
+            if (emoji && accounts && /^\/api\/emoji(\/|$)/.test(url.pathname)) return emoji.handle(request, url, accounts.sessionUser(request), source);
             if (url.pathname.startsWith('/api/')) return accounts ? accounts.handle(request, url, server, source) : json({ error: 'Not found' }, 404);
             const roomMatch = /^\/rooms\/([A-Za-z0-9_-]{43})(\/ice)?$/.exec(url.pathname);
             if (roomMatch && (roomMatch[2] && request.method === 'GET' || !roomMatch[2] && request.method === 'DELETE')) {
@@ -280,7 +297,7 @@ export function startSignaling(options: SignalingOptions) {
 if (import.meta.main) {
     const rawPort = process.env.PORT ?? '3000';
     if (!/^\d+$/.test(rawPort) || Number(rawPort) < 1 || Number(rawPort) > 65535) throw new Error('PORT must be 1–65535');
-    const app = startSignaling({ adminToken: process.env.ADMIN_TOKEN ?? '', origin: process.env.PUBLIC_ORIGIN ?? 'http://localhost:3000', hostname: process.env.HOST ?? '127.0.0.1', port: Number(rawPort), turnSecret: process.env.TURN_SECRET, turnUrls: process.env.TURN_URLS?.split(',').map(value => value.trim()).filter(Boolean), relayOnly: process.env.RELAY_ONLY === 'true', trustProxy: process.env.TRUST_PROXY === 'true', dataDir: process.env.ACCOUNTS === 'off' ? undefined : process.env.DATA_DIR || 'data', apps: nativeApps(), nativePush: nativeSenderFromEnv() });
+    const app = startSignaling({ adminToken: process.env.ADMIN_TOKEN ?? '', origin: process.env.PUBLIC_ORIGIN ?? 'http://localhost:3000', hostname: process.env.HOST ?? '127.0.0.1', port: Number(rawPort), turnSecret: process.env.TURN_SECRET, turnUrls: process.env.TURN_URLS?.split(',').map(value => value.trim()).filter(Boolean), relayOnly: process.env.RELAY_ONLY === 'true', trustProxy: process.env.TRUST_PROXY === 'true', emojiImportHosts: process.env.EMOJI_IMPORT_HOSTS?.split(',').map(value => value.trim()).filter(Boolean), dataDir: process.env.ACCOUNTS === 'off' ? undefined : process.env.DATA_DIR || 'data', apps: nativeApps(), nativePush: nativeSenderFromEnv() });
     console.log(`Signaling listening on ${app.server.url}`);
     for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, async () => { await app.stop(); process.exit(0); });
 }

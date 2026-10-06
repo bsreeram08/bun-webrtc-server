@@ -1,6 +1,7 @@
 // End-to-end accounts check: passkey sign-up via invite, contacts, presence, Signal-protocol messages
 // through the encrypted mailbox (online, offline, reordered, duplicated), safety numbers, key changes,
-// burn, a video call accepted from the incoming sheet, sign-out and passkey sign-in.
+// burn, slash commands (polls, /me, /timer, /verify, /reset), emoji shortcodes and custom emoji/stickers,
+// a video call accepted from the incoming sheet, sign-out and passkey sign-in.
 // Uses Chromium's virtual authenticator.
 // Starts its own signaling server on a throwaway DATA_DIR. Usage: node tests/browser/accounts.mjs
 import { spawn, spawnSync } from 'node:child_process';
@@ -26,7 +27,7 @@ const diagnose = () => Promise.all(pages.map(page => page.evaluate(() => ({ auth
 const shot = async (page, name) => { if (shots) await page.screenshot({ path: join(shots, `${name.startsWith('e2e-') ? '' : 'acct-'}${name}.png`) }); };
 const logText = page => page.textContent('#chat-log');
 const count = (text, needle) => text.split(needle).length - 1;
-const serverBytes = () => Buffer.concat(readdirSync(dataDir).map(name => readFileSync(join(dataDir, name)))).toString('latin1');
+const serverBytes = () => Buffer.concat(readdirSync(dataDir, { withFileTypes: true }).filter(entry => entry.isFile()).map(entry => readFileSync(join(dataDir, entry.name)))).toString('latin1');
 
 async function person() {
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 });
@@ -115,6 +116,100 @@ try {
   await bob.fill('#chat-input', 'still in sync'); await bob.click('#chat-send');
   await alice.waitForFunction(() => document.getElementById('chat-log').textContent.includes('still in sync'), null, { timeout: 15000 });
   step('out-of-order and duplicated envelopes were shown once each, in order, and the ratchet kept working');
+
+  // ---------- Slash commands ----------
+  const shotAs = async (page, name) => { if (shots) { await page.waitForTimeout(350); await page.screenshot({ path: join(shots, `${name}.png`) }); } };
+  const command = async (page, text) => { await page.fill('#chat-input', text); await page.click('#chat-send'); };
+  const popupNames = page => page.$$eval('#cmd-popup li .cmd-name', items => items.map(item => item.textContent));
+  // Autocomplete: "/" lists commands, typing filters, arrows move, Tab completes.
+  await alice.click('#chat-input'); await alice.keyboard.type('/');
+  await alice.waitForFunction(() => !document.getElementById('cmd-popup').hidden, null, { timeout: 5000 });
+  await alice.keyboard.type('po');
+  if ((await popupNames(alice)).join() !== '/poll') throw new Error(`Autocomplete did not filter: ${await popupNames(alice)}`);
+  if (await alice.getAttribute('#chat-input', 'aria-expanded') !== 'true' || !(await alice.getAttribute('#chat-input', 'aria-activedescendant'))) throw new Error('Autocomplete is not exposed to assistive technology');
+  await shotAs(alice, 'cmd-1-autocomplete');
+  await alice.keyboard.press('ArrowDown'); await alice.keyboard.press('Tab');
+  if (await alice.inputValue('#chat-input') !== '/poll ') throw new Error('Tab did not complete the command');
+  await alice.keyboard.type('"Lunch?" "Pizza" "Sushi"'); await alice.click('#chat-send');
+  await alice.waitForFunction(() => document.getElementById('chat-input').value === '', null, { timeout: 5000 }).catch(() => { throw new Error('A successful command was left in the composer'); });
+  await bob.waitForFunction(() => document.querySelector('#chat-log li.kind-poll .poll-question')?.textContent === 'Lunch?', null, { timeout: 15000 });
+  await bob.click('#chat-log li.kind-poll .poll-option[data-option="1"]');
+  await alice.waitForFunction(() => document.querySelector('#chat-log li.kind-poll .poll-option[data-option="1"] .poll-count')?.textContent === '1', null, { timeout: 15000 });
+  await alice.click('#chat-log li.kind-poll .poll-option[data-option="0"]');
+  await bob.waitForFunction(() => document.querySelector('#chat-log li.kind-poll .poll-option[data-option="0"] .poll-count')?.textContent === '1', null, { timeout: 15000 });
+  // Bob changes his mind: Sushi → Pizza, and alice's tally follows.
+  await bob.click('#chat-log li.kind-poll .poll-option[data-option="0"]');
+  await alice.waitForFunction(() => document.querySelector('#chat-log li.kind-poll .poll-option[data-option="0"] .poll-count')?.textContent === '✓ 2' && document.querySelector('#chat-log li.kind-poll .poll-option[data-option="1"] .poll-count')?.textContent === '0', null, { timeout: 15000 });
+  await bob.waitForFunction(() => document.querySelector('#chat-log li.kind-poll .poll-option[data-option="0"] .poll-count')?.textContent === '✓ 2', null, { timeout: 15000 });
+  await shotAs(bob, 'cmd-2-poll');
+  step('/poll from autocomplete (arrows + Tab); both voted, a changed vote, live tallies on both sides');
+
+  await command(alice, '/me waves from the command line');
+  await bob.waitForFunction(() => [...document.querySelectorAll('#chat-log li.kind-action .message-text')].some(item => item.textContent === 'alice waves from the command line'), null, { timeout: 15000 });
+  await command(alice, '/shrug fine');
+  await bob.waitForFunction(() => document.getElementById('chat-log').textContent.includes('fine ¯\\_(ツ)_/¯'), null, { timeout: 15000 });
+  await shotAs(bob, 'cmd-3-me');
+  step('/me renders an action line and /shrug appends ¯\\_(ツ)_/¯ on the other device');
+
+  await command(alice, '/timer 1h');
+  if (await alice.inputValue('#disappear') !== '3600000') throw new Error('/timer did not set the disappearing timer');
+  await command(alice, '/timer off');
+  if (await alice.inputValue('#disappear') !== 'off') throw new Error('/timer off did not clear the timer');
+  await command(alice, '/verify'); await visible(alice, '#safety');
+  if ((await alice.textContent('#safety-number')) !== codeA) throw new Error('/verify did not show the security code');
+  await alice.click('#safety-close');
+  await command(alice, '/reset'); await visible(alice, '#rotate-confirm'); await alice.click('#rotate-yes');
+  await bob.waitForFunction(() => document.getElementById('chat-log').textContent.includes('Secure session reset by alice'), null, { timeout: 15000 });
+  step('/timer sets and clears the timer, /verify opens the security code, /reset resets the secure session');
+
+  const before = await logText(bob);
+  await command(alice, '/nope do not send');
+  if (!(await alice.textContent('#chat-status')).includes('Unknown command /nope')) throw new Error('Unknown command gave no hint');
+  if (await alice.inputValue('#chat-input') !== '/nope do not send') throw new Error('An unknown command should stay in the composer to fix');
+  await command(alice, '//literal slash');
+  await bob.waitForFunction(() => document.getElementById('chat-log').textContent.includes('/literal slash'), null, { timeout: 15000 });
+  if ((await logText(bob)).includes('nope do not send') || before.includes('/literal')) throw new Error('An unknown command reached the other device');
+  await alice.fill('#chat-input', '/help'); await alice.click('#chat-send');
+  await alice.waitForFunction(() => document.querySelectorAll('#cmd-popup li').length >= 10, null, { timeout: 5000 });
+  if (!(await popupNames(alice)).includes('/emoji')) throw new Error('/help does not list /emoji');
+  await shotAs(alice, 'cmd-4-help');
+  await alice.keyboard.press('Escape');
+  if (!(await alice.locator('#cmd-popup').isHidden())) throw new Error('Escape did not close the command list');
+  step('unknown commands are never sent, //text sends a literal slash, /help lists every command');
+
+  // ---------- Emoji ----------
+  await alice.click('#chat-input'); await alice.fill('#chat-input', ''); await alice.keyboard.type('party time :partyi');
+  await alice.waitForFunction(() => document.getElementById('cmd-popup').dataset.mode === 'emoji' && !document.getElementById('cmd-popup').hidden, null, { timeout: 5000 });
+  await shotAs(alice, 'emoji-1-autocomplete');
+  await alice.keyboard.press('Tab');
+  if (!(await alice.inputValue('#chat-input')).includes('🥳')) throw new Error(`Emoji autocomplete did not insert: ${await alice.inputValue('#chat-input')}`);
+  await alice.keyboard.type('and :smile: done'); await alice.click('#chat-send');
+  await bob.waitForFunction(() => document.getElementById('chat-log').textContent.includes('party time 🥳 and 😄 done'), null, { timeout: 15000 });
+  await command(alice, ':thumbsup:');
+  await bob.waitForFunction(() => [...document.querySelectorAll('#chat-log li')].some(item => item.dataset.emoji === 'big' && item.textContent.includes('👍')), null, { timeout: 15000 });
+  step('":partyi" autocompletes to 🥳, ":smile:" converts on send, and an emoji-only message renders big');
+
+  // A custom emoji added in Settings: bob gets ":name:" end to end and renders it from the pack.
+  await alice.click('#conv-back'); await alice.click('#account-menu summary'); await alice.click('#account-settings');
+  await alice.fill('#emoji-name', 'test_parrot');
+  const gif = Buffer.from('R0lGODlhEAAQAPAAAP8AAP///yH5BAAAAAAALAAAAAAQABAAAAIOhI+py+0Po5y02ouzPgUAOw==', 'base64');
+  await alice.setInputFiles('#emoji-file', { name: 'parrot.gif', mimeType: 'image/gif', buffer: gif });
+  await alice.click('#emoji-add');
+  await alice.waitForFunction(() => document.getElementById('emoji-status').textContent.startsWith('Added :test_parrot:'), null, { timeout: 15000 });
+  await alice.waitForFunction(() => document.querySelector('#emoji-list img.custom-emoji'), null, { timeout: 15000 });
+  await alice.locator('.emoji-settings').scrollIntoViewIfNeeded(); await shotAs(alice, 'emoji-3-settings');
+  await alice.evaluate(() => { document.getElementById('settings').open = false; });
+  await alice.click('#contact-list .contact.mutual .row-button'); await visible(alice, '#conv-head');
+  await alice.click('#chat-input'); await alice.keyboard.type('look :test_p');
+  await alice.waitForFunction(() => document.querySelector('#cmd-popup:not([hidden]) li img.custom-emoji'), null, { timeout: 5000 });
+  await alice.keyboard.press('Tab'); await alice.keyboard.type('nice'); await alice.click('#chat-send');
+  await bob.waitForFunction(() => [...document.querySelectorAll('#chat-log li img.custom-emoji')].some(img => img.alt === ':test_parrot:' && img.complete && img.naturalWidth > 0), null, { timeout: 20000 });
+  await command(alice, ':test_parrot:');
+  await bob.waitForFunction(() => [...document.querySelectorAll('#chat-log li')].some(item => item.dataset.emoji === 'sticker'), null, { timeout: 15000 });
+  const stickerSize = await bob.$$eval('#chat-log li[data-emoji="sticker"] img.custom-emoji', images => images.at(-1).getBoundingClientRect().width);
+  if (stickerSize < 100) throw new Error(`Sticker rendered small: ${stickerSize}px`);
+  await shotAs(bob, 'emoji-2-sticker');
+  step('a custom emoji uploaded in Settings autocompletes with its thumbnail, reaches bob as :name: and renders inline and as a large sticker');
 
   // Manual key rotation from inside the chat: a fresh handshake, same security code, messages keep flowing.
   const rotShot = async (page, name) => { if (shots) { await page.waitForTimeout(400); await page.screenshot({ path: join(shots, `rot-${name}.png`) }); } };

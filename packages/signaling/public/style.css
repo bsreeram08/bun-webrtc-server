@@ -365,3 +365,46 @@ body[data-wallpaper="circuit"] .chat-section::before, .wall-swatch[data-wallpape
   .swatch, .wall-swatch { transition: box-shadow .15s, border-color .15s, transform .15s; }
   .swatch:active, .wall-swatch:active { transform: scale(.97); }
 }
+
+/* ---------- Slash commands and emoji autocomplete ---------- */
+.composer { position: relative; }
+.cmd-popup { position: absolute; left: 8px; right: 8px; bottom: calc(100% + 6px); z-index: 30; margin: 0; padding: 6px; list-style: none; max-height: min(320px, 50vh); overflow-y: auto; background: var(--surface); color: var(--text); border: 1px solid var(--line-strong); border-radius: 14px; box-shadow: 0 10px 30px #0006; }
+.cmd-popup[hidden] { display: none; }
+.cmd-popup li { display: grid; grid-template-columns: auto auto 1fr; align-items: baseline; gap: 4px 10px; padding: 8px 10px; border-radius: 10px; cursor: pointer; }
+.cmd-popup[data-mode="emoji"] li { align-items: center; grid-template-columns: 28px auto 1fr; }
+.cmd-popup li[aria-selected="true"] { background: var(--raised); outline: 1px solid var(--accent); }
+.cmd-name { font-weight: 600; color: var(--accent); font-family: var(--chat-font); }
+.cmd-args { color: var(--muted); font-size: .85em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.cmd-desc { color: var(--muted); font-size: .85em; text-align: right; min-width: 0; }
+.cmd-glyph { font-size: 1.35rem; line-height: 1; text-align: center; }
+@media (max-width: 480px) { .cmd-popup li { grid-template-columns: auto 1fr; } .cmd-popup[data-mode="emoji"] li { grid-template-columns: 28px 1fr; } .cmd-desc { grid-column: 1 / -1; text-align: left; } .cmd-popup[data-mode="emoji"] .cmd-desc:empty { display: none; } }
+
+/* /me actions and polls */
+#chat-log li.kind-action { background: transparent; border: 1px dashed var(--line-strong); }
+#chat-log li.kind-action .message-text { font-style: italic; }
+#chat-log li.kind-poll { min-width: min(280px, 82%); }
+.poll-question { display: block; margin-bottom: 8px; }
+.poll-options { display: grid; gap: 6px; }
+.poll-option { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; padding: 8px 12px; border-radius: 10px; border: 1px solid var(--line-strong); background: var(--surface-2); color: var(--text); font: inherit; text-align: left; cursor: pointer; overflow: hidden; }
+.poll-option[aria-pressed="true"] { border-color: var(--accent); }
+.poll-option > span:not(.poll-bar) { position: relative; }
+.poll-bar { position: absolute; inset: 0 auto 0 0; width: 0; background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.poll-bar[data-share="1"] { width: 25%; } .poll-bar[data-share="2"] { width: 50%; } .poll-bar[data-share="3"] { width: 75%; } .poll-bar[data-share="4"] { width: 100%; }
+.poll-count { font-variant-numeric: tabular-nums; color: var(--muted); }
+.poll-option[aria-pressed="true"] .poll-count { color: var(--accent); font-weight: 600; }
+.poll-note { display: block; margin-top: 6px; color: var(--muted); font-size: .78rem; }
+@media (prefers-reduced-motion: no-preference) { .poll-bar { transition: width .2s ease; } }
+
+/* Emoji: inline custom images, big emoji-only messages and stickers */
+img.custom-emoji, canvas.custom-emoji { width: 1.4em; height: 1.4em; object-fit: contain; vertical-align: -0.3em; }
+#chat-log li[data-emoji="big"] .message-text { font-size: 2.4rem; line-height: 1.15; }
+#chat-log li[data-emoji="big"] .custom-emoji { width: 2.6rem; height: 2.6rem; vertical-align: middle; }
+#chat-log li[data-emoji="sticker"] { background: transparent; box-shadow: none; padding: 2px 4px; }
+#chat-log li[data-emoji="sticker"] .custom-emoji { width: 128px; height: 128px; }
+.emoji-settings input[type="text"] { width: 100%; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 12px; padding: 11px 12px; }
+.emoji-actions { display: flex; align-items: center; gap: 12px; margin: 8px 0; }
+.emoji-actions .custom-emoji { width: 48px; height: 48px; }
+.emoji-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; max-height: 260px; overflow-y: auto; }
+.emoji-list li { display: flex; align-items: center; gap: 10px; }
+.emoji-list .custom-emoji { width: 32px; height: 32px; }
+.emoji-list button { margin-left: auto; }

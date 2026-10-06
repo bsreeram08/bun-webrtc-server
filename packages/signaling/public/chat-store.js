@@ -3,6 +3,10 @@
   const MAX_MESSAGES = 2000, MAX_PER_CONVERSATION = 500, CLOCK_SKEW = 300000, MAX_FILE = 10 * 1024 * 1024, MAX_AGE = 30 * 86400000;
   const ITERATIONS = 600000, encoder = new TextEncoder();
   const FIELDS = ['id', 'conversationId', 'direction', 'text', 'createdAt', 'status', 'expiresAt'];
+  // Optional rich content. `text` is always a readable fallback, so anything that cannot show the rich
+  // form still shows the message. kind 'action' is a /me line; kind 'poll' carries {question, options}
+  // and local tallies in `votes` ({me, peer}: option index or null) — 1:1 chats have two voters.
+  const OPTIONAL = ['kind', 'poll', 'votes'], MAX_OPTIONS = 10, MAX_OPTION = 200;
   const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   const ROOM = /^[A-Za-z0-9_-]{43}$/;
   const FORMAT = 'webrtc-bun-chat-backup';
@@ -13,10 +17,35 @@
     return value && typeof value === 'object' && !Array.isArray(value) &&
       Object.keys(value).length === fields.length && fields.every(key => Object.hasOwn(value, key));
   }
+  const shortText = (value, max) => typeof value === 'string' && value.trim().length > 0 && value.length <= max;
+  /** A poll's question and 2–10 options, each at most 200 characters; returns a clean copy or throws. */
+  function cleanPoll(poll) {
+    if (!exactObject(poll, ['question', 'options']) || !shortText(poll.question, MAX_OPTION) || !Array.isArray(poll.options) ||
+        poll.options.length < 2 || poll.options.length > MAX_OPTIONS || !poll.options.every(option => shortText(option, MAX_OPTION))) throw new Error('Invalid poll.');
+    return { question: poll.question, options: [...poll.options] };
+  }
+  const voteOk = (value, count) => value === null || Number.isSafeInteger(value) && value >= 0 && value < count;
+  function cleanRich(message) {
+    const extra = Object.keys(message).filter(key => !FIELDS.includes(key));
+    if (extra.some(key => !OPTIONAL.includes(key))) throw new Error('Invalid chat message.');
+    const out = {};
+    if (message.kind === undefined) { if (message.poll !== undefined || message.votes !== undefined) throw new Error('Invalid chat message.'); return out; }
+    if (message.direction === 'system' || !['action', 'poll'].includes(message.kind)) throw new Error('Invalid chat message.');
+    out.kind = message.kind;
+    if (message.kind === 'action') { if (message.poll !== undefined || message.votes !== undefined) throw new Error('Invalid chat message.'); return out; }
+    out.poll = cleanPoll(message.poll);
+    if (message.votes !== undefined) {
+      const votes = message.votes;
+      if (!votes || typeof votes !== 'object' || Array.isArray(votes) || Object.keys(votes).some(key => !['me', 'peer'].includes(key)) ||
+          !Object.values(votes).every(value => voteOk(value, out.poll.options.length))) throw new Error('Invalid poll votes.');
+      out.votes = { ...votes };
+    }
+    return out;
+  }
   // 'system' rows (local notices such as a session reset) exist only on this device: only note() writes them
   // and stored records are read back with them allowed; put() and backup import never accept them.
   function validate(message, allowSystem = false) {
-    if (!exactObject(message, FIELDS) || typeof message.id !== 'string' || !UUID.test(message.id) ||
+    if (!message || typeof message !== 'object' || Array.isArray(message) || !FIELDS.every(key => Object.hasOwn(message, key)) || typeof message.id !== 'string' || !UUID.test(message.id) ||
         typeof message.conversationId !== 'string' || !ROOM.test(message.conversationId) ||
         !(['incoming', 'outgoing'].includes(message.direction) || allowSystem && message.direction === 'system') || typeof message.text !== 'string' ||
         message.text.length === 0 || encoder.encode(message.text).byteLength > 4096 ||
@@ -26,17 +55,21 @@
           message.expiresAt > message.createdAt && message.expiresAt <= Math.min(8640000000000000, message.createdAt + MAX_AGE))) {
       throw new Error('Invalid chat message. Only message content and delivery metadata are allowed.');
     }
+    const rich = cleanRich(message);
     // Explicitly construct the stored record: never serialize invitation tokens, keys or UI state.
-    return Object.fromEntries(FIELDS.map(key => [key, key === 'id' ? message.id.toLowerCase() : message[key]]));
+    return { ...Object.fromEntries(FIELDS.map(key => [key, key === 'id' ? message.id.toLowerCase() : message[key]])), ...rich };
   }
   const expired = (message, now = Date.now()) => message.expiresAt !== null && message.expiresAt <= now;
   const key = message => `${message.conversationId}:${message.id.toLowerCase()}`;
   const sorted = messages => messages.sort((a, b) => a.createdAt - b.createdAt || key(a).localeCompare(key(b)));
+  // Same message: identical fields, kind and poll (votes are local tallies and never conflict).
+  const sameContent = (a, b) => FIELDS.every(field => field === 'status' || a[field] === b[field]) && a.kind === b.kind && JSON.stringify(a.poll) === JSON.stringify(b.poll);
   function combine(previous, next) {
-    if (previous && FIELDS.some(field => field !== 'status' && previous[field] !== next[field])) {
+    if (previous && !sameContent(previous, next)) {
       throw new Error('A duplicate message has conflicting content or expiration. Nothing was imported.');
     }
-    return previous?.status === 'delivered' ? { ...next, status: 'delivered' } : next;
+    const merged = previous?.votes ? { ...next, votes: previous.votes } : next;
+    return previous?.status === 'delivered' ? { ...merged, status: 'delivered' } : merged;
   }
   function openDatabase() {
     if (!database) database = new Promise((resolve, reject) => {
@@ -108,14 +141,15 @@
       if (Number.isSafeInteger(expiresAt)) expiresAt -= createdAt - now;
       createdAt = now;
     }
-    try { message = validate({ id: payload?.id, conversationId, direction: 'incoming', text: payload?.text, createdAt, status: 'delivered', expiresAt }); }
+    const rich = payload?.kind === undefined ? {} : payload.kind === 'poll' ? { kind: 'poll', poll: payload.poll } : { kind: payload.kind };
+    try { message = validate({ id: payload?.id, conversationId, direction: 'incoming', text: payload?.text, createdAt, status: 'delivered', expiresAt, ...rich }); }
     catch { throw coded('invalid', 'Invalid incoming message.'); }
     if (expired(message)) return 'expired';
     return transaction((active, now) => {
       if (expired(message, now)) return { result: 'expired' };
       const previous = active.get(key(message));
       if (previous) {
-        if (FIELDS.some(field => field !== 'status' && previous[field] !== message[field])) throw coded('conflict', 'A message identifier was reused with different content.');
+        if (!sameContent(previous, message)) throw coded('conflict', 'A message identifier was reused with different content.');
         return { result: 'duplicate' };
       }
       if (fromPeer(active, conversationId) >= MAX_PER_CONVERSATION) throw coded('conversation-full', 'This conversation holds 500 incoming messages.');
@@ -134,7 +168,9 @@
     const size = Object.keys(payload).length;
     switch (payload.type) {
       case 'receipt': case 'burn': if (size === 3) return payload.type; break;
-      case 'message': if (size === 6) return payload.type; break;
+      // Plain (6 keys), a /me action (+kind) or a poll (+kind, +poll); content is validated by receive().
+      case 'message': if (size === 6 && !('kind' in payload) || size === 7 && payload.kind === 'action' || size === 8 && payload.kind === 'poll' && 'poll' in payload) return payload.type; break;
+      case 'vote': if (size === 5 && typeof payload.poll === 'string' && UUID.test(payload.poll) && (payload.option === null || Number.isSafeInteger(payload.option) && payload.option >= 0 && payload.option < MAX_OPTIONS)) return payload.type; break;
       case 'rotate': if (size === 4 && ['manual', 'scheduled'].includes(payload.reason)) return payload.type; break;
       case 'policy': if (size === 4 && Number.isSafeInteger(payload.rotateEveryMs) && payload.rotateEveryMs >= 0) return payload.type; break;
     }
@@ -154,6 +190,19 @@
       if (fromPeer(active, conversationId) >= MAX_PER_CONVERSATION) throw coded('conversation-full', 'This conversation holds 500 incoming messages.');
       if (active.size >= MAX_MESSAGES) throw coded('full', 'This device holds 2,000 messages. Clear chat history to receive more.');
       return { writes: [message], result: true };
+    });
+  }
+  /**
+   * Records one voter's choice on a poll in this conversation (null clears it). One vote per voter,
+   * changeable; a vote for an unknown poll or option is ignored. Updates in place, so votes add no rows.
+   */
+  async function vote(conversationId, pollId, voter, option) {
+    if (typeof conversationId !== 'string' || !ROOM.test(conversationId) || typeof pollId !== 'string' || !UUID.test(pollId) || !['me', 'peer'].includes(voter)) throw coded('invalid', 'Invalid vote.');
+    return transaction(active => {
+      const poll = active.get(`${conversationId}:${pollId.toLowerCase()}`);
+      if (poll?.kind !== 'poll' || !voteOk(option, poll.poll.options.length)) return { result: false };
+      if ((poll.votes?.[voter] ?? null) === option) return { result: true };
+      return { writes: [{ ...poll, votes: { ...poll.votes, [voter]: option } }], result: true };
     });
   }
   /** Rows a contact can cause on this device: their messages and the system lines their payloads add. */
@@ -285,5 +334,5 @@
       return { writes: [...writes.values()], result: count };
     });
   }
-  window.ChatStore = Object.freeze({ put, list, clear, removeConversation, setStatus, exportBackup, importBackup, receive, note, checkPayload, inboundDisposition, isMessageId: id => typeof id === 'string' && UUID.test(id) });
+  window.ChatStore = Object.freeze({ put, list, clear, removeConversation, setStatus, exportBackup, importBackup, receive, note, vote, checkPayload, inboundDisposition, MAX_OPTIONS, isMessageId: id => typeof id === 'string' && UUID.test(id) });
 })();

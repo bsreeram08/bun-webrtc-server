@@ -61,7 +61,7 @@
     say('me-name', `@${user.username}`); say('account-status', '');
     try { unread = JSON.parse(localStorage.getItem(`unread-v1:${me.id}`) || '{}') || {}; } catch { unread = {}; }
     ready = setupKeys(user);
-    window.Theme?.setAccount(user.id);
+    window.Theme?.setAccount(user.id); App.accountId = user.id; App.myName = user.username; App.rescheduleReminders?.(); loadEmoji();
     $('rotation-every').value = String(myRotation());
     loadContacts(); connectEvents(); window.Alerts?.signedIn();
   }
@@ -70,7 +70,7 @@
     clearTimeout(retryTimer); clearTimeout(flushTimer); const previous = events; events = null; previous?.close();
     if (App.active) App.end(); App.closeConversation(); $('key-banner').hidden = true;
     body.dataset.auth = 'out'; body.dataset.screen = ''; say('account-status', message);
-    hideRing(); stopCalling(); window.Alerts?.signedOut(); window.Theme?.setAccount(null);
+    hideRing(); stopCalling(); window.Alerts?.signedOut(); window.Theme?.setAccount(null); App.accountId = null; App.myName = null; App.rescheduleReminders?.();
   }
   async function signOut(everywhere) {
     $('account-menu').open = false;
@@ -206,6 +206,7 @@
             return { rotate: true }; // The box keeps only the peer's new session, in its own write.
           }
           else if (type === 'policy') rememberPeerRotation(from.id, payload.rotateEveryMs);
+          else if (type === 'vote') await window.ChatStore.vote(conversationId, payload.poll, 'peer', payload.option); // A tally update: no row, no receipt.
           else if (payload.type === 'receipt') await window.ChatStore.setStatus(conversationId, payload.id, 'delivered');
           else if (payload.type === 'burn') { await window.ChatStore.removeConversation(conversationId); burned = true; }
           else if (await window.ChatStore.receive(conversationId, payload) === 'stored') {
@@ -267,7 +268,7 @@
         for (const record of queued) {
           try {
             if (!prepared) { await rotateIfDue(contact); await tellPolicy(contact); prepared = true; }
-            await sendControl(contact, { v: 1, type: 'message', id: record.id, text: record.text, createdAt: record.createdAt, expiresAt: record.expiresAt });
+            await sendControl(contact, App.messagePayload(record)); // Plain, /me action or poll.
             await window.ChatStore.setStatus(conversationId, record.id, 'sent');
           } catch (error) {
             if (current?.id === contact.id) App.chatStatus(error.code === 'identity-blocked' ? `${contact.username}'s security code changed. Review it to keep sending.` : error.status === 404 ? `${contact.username} has not opened the app since encryption was enabled. Messages wait on this device.` : `Not sent yet: ${error.message}`);
@@ -295,6 +296,66 @@
     App.chatStatus(`Burned on this device. ${contact.username}'s device deletes its copy when the encrypted request arrives.`);
   };
   App.flagged = record => flagged.has(record.id.toLowerCase());
+
+  // ---------- Custom emoji (workspace pack) ----------
+  let emojiTimer;
+  async function loadEmoji() {
+    clearTimeout(emojiTimer);
+    if (!me || !window.Emoji) return;
+    try {
+      const { emoji } = await api('/api/emoji');
+      window.Emoji.setCustom(emoji); paintEmojiList(emoji); App.refreshHistory();
+    } catch {}
+    emojiTimer = setTimeout(loadEmoji, 60000); // Pick up emoji other people add.
+  }
+  let emojiCheckedAt = 0;
+  App.onUnknownEmoji = () => { if (me && Date.now() - emojiCheckedAt > 10000) { emojiCheckedAt = Date.now(); loadEmoji(); } };
+  function paintEmojiList(list) {
+    $('emoji-list').replaceChildren(...list.map(item => {
+      const row = document.createElement('li'), img = document.createElement('img'), name = document.createElement('code');
+      img.className = 'custom-emoji'; img.src = item.url; img.alt = ''; img.decoding = 'async'; name.textContent = `:${item.name}:`;
+      row.append(img, name);
+      if (item.mine) {
+        const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'link danger-text'; remove.textContent = 'Delete';
+        remove.setAttribute('aria-label', `Delete :${item.name}:`);
+        remove.onclick = async () => {
+          try { await api(`/api/emoji/${encodeURIComponent(item.name)}`, 'DELETE'); say('emoji-status', `Deleted :${item.name}:.`); loadEmoji(); }
+          catch (error) { say('emoji-status', error.message); }
+        };
+        row.append(remove);
+      }
+      return row;
+    }));
+  }
+  const readFile = file => new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = () => reject(new Error('Could not read that file.')); reader.readAsDataURL(file); });
+  $('emoji-file').onchange = async () => {
+    const file = $('emoji-file').files[0], preview = $('emoji-preview');
+    if (!file) { preview.hidden = true; return; }
+    if (!$('emoji-name').value) $('emoji-name').value = file.name.replace(/\.[a-z0-9]+$/i, '').toLowerCase().replace(/[^a-z0-9_+-]+/g, '_').slice(0, 32);
+    if (preview.src.startsWith('blob:')) URL.revokeObjectURL(preview.src);
+    preview.src = URL.createObjectURL(file); preview.hidden = false; // img-src allows blob: for this local preview only.
+  };
+  $('emoji-add').onclick = async () => {
+    const name = $('emoji-name').value.trim().toLowerCase().replace(/^:|:$/g, ''), file = $('emoji-file').files[0], url = $('emoji-url').value.trim();
+    if (!/^[a-z0-9_+-]{2,32}$/.test(name)) { say('emoji-status', 'Names are 2–32 characters: a–z, 0–9, _, + or -.'); return; }
+    if (!file && !url) { say('emoji-status', 'Choose an image file or paste an image address.'); return; }
+    if (file && file.size > 512 * 1024) { say('emoji-status', 'Images must be at most 512 KB.'); return; }
+    $('emoji-add').disabled = true; say('emoji-status', 'Adding…');
+    try {
+      if (file) await api('/api/emoji', 'POST', { name, image: await readFile(file) });
+      else await api('/api/emoji/import', 'POST', { name, url });
+      say('emoji-status', `Added :${name}:. Type :${name.slice(0, 3)} in a message to use it.`);
+      $('emoji-name').value = ''; $('emoji-file').value = ''; $('emoji-url').value = ''; $('emoji-preview').hidden = true;
+      loadEmoji();
+    } catch (error) { say('emoji-status', error.message); }
+    finally { $('emoji-add').disabled = false; }
+  };
+  /** A poll vote travels end to end like any control payload; votes from an unaccepted identity are ignored on receipt. */
+  App.onVote = async (poll, option) => {
+    const contact = current && contactById(current.id);
+    if (!contact) throw new Error('Open the conversation to vote.');
+    await sendControl(contact, { v: 1, type: 'vote', id: crypto.randomUUID(), poll, option });
+  };
 
   // ---------- Key rotation ----------
   // Sessions (ratchets) rotate; identities do not rotate on a timer — that would make security-code changes
