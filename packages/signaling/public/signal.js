@@ -40,13 +40,27 @@
     } catch { return false; }
   }
   // Private keys stay non-extractable CryptoKeys; only public halves are exported.
+  // X25519 private keys are kept as PKCS#8 bytes, not CryptoKey objects: Safari/WebKit stores X25519 CryptoKeys
+  // in IndexedDB as empty objects, so every reload silently produced new keys. The bytes are re-imported as a
+  // non-extractable key when used (cached per public key). Pairs stored by older versions (keyPair) still work.
+  const privateKeys = new Map();
   async function dhPair() {
-    const keyPair = await subtle().generateKey({ name: 'X25519' }, false, ['deriveBits']);
-    return { keyPair, pub: new Uint8Array(await subtle().exportKey('raw', keyPair.publicKey)) };
+    const keyPair = await subtle().generateKey({ name: 'X25519' }, true, ['deriveBits']);
+    return { priv: new Uint8Array(await subtle().exportKey('pkcs8', keyPair.privateKey)), pub: new Uint8Array(await subtle().exportKey('raw', keyPair.publicKey)) };
+  }
+  async function privateKeyOf(pair) {
+    if (pair.keyPair?.privateKey) return pair.keyPair.privateKey;
+    if (!ArrayBuffer.isView(pair.priv)) throw coded('storage', 'Encryption key is missing from this browser’s storage');
+    const id = b64(pair.pub);
+    if (!privateKeys.has(id)) {
+      if (privateKeys.size > 256) privateKeys.clear();
+      privateKeys.set(id, await subtle().importKey('pkcs8', pair.priv, { name: 'X25519' }, false, ['deriveBits']));
+    }
+    return privateKeys.get(id);
   }
   async function dh(pair, publicBytes) {
     const key = await subtle().importKey('raw', publicBytes, { name: 'X25519' }, false, []);
-    return new Uint8Array(await subtle().deriveBits({ name: 'X25519', public: key }, pair.keyPair.privateKey, 256));
+    return new Uint8Array(await subtle().deriveBits({ name: 'X25519', public: key }, await privateKeyOf(pair), 256));
   }
   async function hkdf(ikm, salt, info, length) {
     const key = await subtle().importKey('raw', ikm, 'HKDF', false, ['deriveBits']);
@@ -217,7 +231,12 @@
     }
     async function identity() {
       let value = await backend.get('identity');
-      if (!value) { value = await generateIdentity(); await backend.put('identity', value); }
+      if (!value) {
+        value = await generateIdentity(); await backend.put('identity', value);
+        // Read it back: a browser that cannot keep these keys must fail loudly, not mint new keys on every call.
+        const kept = await backend.get('identity');
+        if (!kept?.sign?.privateKey || !ArrayBuffer.isView(kept.dh?.priv) || kept.pub?.dh !== value.pub.dh) throw coded('storage', 'This browser cannot keep encryption keys');
+      }
       return value;
     }
     /** Current signed prekey, rotated weekly. Replay records under a retired prekey are pruned with it. */
