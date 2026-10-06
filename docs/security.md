@@ -49,6 +49,8 @@ Payloads are encrypted to the receiving browser (RFC 8291) and contain only the 
 
 Tapping a notification only opens the app on that contact's conversation. Nothing from a notification or the page URL can start or answer a call or turn on the microphone or camera: an incoming call keeps ringing on its sheet until the user taps Accept in the app. A notification's Decline action ends the call through the user's own session.
 
+A video call can be answered with "Audio only": only the microphone is captured, and the camera starts later only when the user taps the camera button. Themes, accent colours and chat wallpapers are cosmetic preferences kept in this browser's localStorage per account and conversation; they are never sent to the server, and stored values are validated against fixed lists before use.
+
 ## Verification code
 
 Every new peer connection runs a commit-then-reveal exchange on a dedicated encrypted data channel: each device commits to a random 256-bit nonce, reveals it only after receiving the other's commitment, and both derive a six-digit code from the two DTLS certificate fingerprints and both nonces. If an intermediary (including a compromised signaling server rewriting SDP) terminates DTLS separately with each device, the devices hash different fingerprints and the codes differ, except with probability one in a million per attempt. Read the code aloud over the call; if it differs, end the call. The check relies on the browser running unmodified app code: a compromised server that serves altered JavaScript can also alter the displayed code, which a packaged app would address.
