@@ -8,6 +8,7 @@
         "demo": "bun --no-env-file scripts/demo.ts",
         "test": "bun --no-env-file test tests/unit",
         "test:browser": "node tests/browser/call.mjs",
+        "test:interop": "cargo test --manifest-path crates/chatcore/Cargo.toml && node tests/interop/run.mjs",
         "typecheck": "tsc -p tsconfig.runtime.json",
         "setup": "bun --no-env-file scripts/setup.ts",
         "room:create": "bun --no-env-file scripts/create-room.ts",
