@@ -63,3 +63,7 @@ To inspect services, use `docker compose --env-file deploy/.env logs --tail=100`
 The deployment images use explicit versions. Keep those versions updated after reviewing release notes and validating calls. Persistent user identities, group conferencing and abuse administration remain separate future work. The browser app supports device-local chat history and encrypted backup files; see [device chat and phone migration](device-chat.md).
 
 References: [coturn configuration](https://github.com/coturn/coturn/blob/master/examples/etc/turnserver.conf), [coturn Docker setup](https://github.com/coturn/coturn/tree/master/docker/coturn), [Caddy automatic HTTPS](https://caddyserver.com/docs/automatic-https).
+
+## Custom emoji
+
+Custom emoji images are stored in `DATA_DIR/emoji/` (content-addressed) and listed in `accounts.sqlite`; back the folder up with the database. Imports by URL are allowed from `emojis.slackmojis.com` and `slackmojis.com`; add more hosts with `EMOJI_IMPORT_HOSTS=host1,host2` (exact host names, https only). The server needs outbound HTTPS to those hosts for imports. nginx must allow request bodies of at least 768 KiB on `/api/emoji` (`client_max_body_size 1m;` covers it; the default 1 MiB already does).

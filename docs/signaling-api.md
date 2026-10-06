@@ -123,3 +123,19 @@ delivery receipts or durable messaging guarantees. Chat needs a separate protoco
 
 TURN credentials remain valid until their timestamp expires even after room
 deletion. See [security boundaries](security.md) and [deployment](deployment.md).
+
+## Custom emoji
+
+All require a signed-in session; writes also require this app's Origin.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/emoji` | The workspace pack: `{ emoji: [{ name, url, animated, mine }] }`. `url` is always same-origin `/emoji/<sha256>.<png|gif|webp>`. |
+| `POST /api/emoji` `{ name, image }` | Upload. `image` is base64 (optionally a `data:image/…;base64,` URL) of a PNG, GIF or WebP up to 512 KB. Names match `^[a-z0-9_+-]{2,32}$` and are unique. 201, or 400/409/413/429. |
+| `POST /api/emoji/import` `{ name, url }` | The server fetches the image from an allowlisted https host (see security.md for the SSRF rules). |
+| `DELETE /api/emoji/:name` | Only the person who added it, or `Authorization: Bearer <ADMIN_TOKEN>`. |
+| `GET /emoji/<sha256>.<ext>` | The image, with a sandboxing CSP and an immutable cache. |
+
+## Message payloads added for commands
+
+Inside the encrypted envelope (and the guest data channel): `{v:1, type:'message', id, text, createdAt, expiresAt}` may add `kind:'action'` (a `/me` line) or `kind:'poll', poll:{question, options}`; `{v:1, type:'vote', id, poll, option}` records a vote (`option` an index, or `null` to clear).
