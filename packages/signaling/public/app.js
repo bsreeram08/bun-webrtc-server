@@ -58,27 +58,56 @@ function tickIcon() {
     svgNode('circle', { class: 'tick-clock', cx: '9', cy: '6', r: '4.2' }), svgNode('path', { class: 'tick-clock tick-hand', d: 'M9 3.6V6l1.6 1' }));
   return svg;
 }
+const who = record => record.direction === 'outgoing' ? 'You' : peerName === 'the other participant' ? 'They' : peerName;
 function describe(record, flagged) {
   if (record.direction === 'system') return `${record.text} · ${new Date(record.createdAt).toLocaleString()}`;
   const delivery = { queued: 'Queued on this device', sent: 'Sent · delivery unconfirmed', delivered: 'Delivered to device', uncertain: 'Restored · delivery unconfirmed' }[record.status];
   const detail = `${record.direction === 'outgoing' ? 'You' : peerName === 'the other participant' ? 'Other participant' : peerName} · ${new Date(record.createdAt).toLocaleString()} · ${delivery}${record.expiresAt ? ' · Disappears ' + new Date(record.expiresAt).toLocaleString() : ''}`;
   return flagged ? `${detail} · Sent under a new security code` : detail;
 }
+/** A poll: the question, then one button per option with its tally; your choice is marked and can be changed. */
+function paintPoll(container, record) {
+  const votes = record.votes || {}, total = Object.values(votes).filter(value => value !== null).length;
+  const question = document.createElement('strong'); question.className = 'poll-question'; question.textContent = record.poll.question;
+  const options = document.createElement('div'); options.className = 'poll-options'; options.setAttribute('role', 'group'); options.setAttribute('aria-label', `Poll: ${record.poll.question}`);
+  record.poll.options.forEach((label, index) => {
+    const count = Object.values(votes).filter(value => value === index).length, mine = votes.me === index;
+    const button = document.createElement('button');
+    button.type = 'button'; button.className = 'poll-option'; button.dataset.poll = record.id; button.dataset.option = String(index);
+    button.setAttribute('aria-pressed', String(mine));
+    const text = document.createElement('span'); text.className = 'poll-label'; text.textContent = label;
+    const tally = document.createElement('span'); tally.className = 'poll-count'; tally.textContent = `${mine ? '✓ ' : ''}${count}`;
+    const bar = document.createElement('span'); bar.className = 'poll-bar'; bar.dataset.share = String(total ? Math.round(count / total * 4) : 0);
+    button.append(bar, text, tally); options.append(button);
+  });
+  const note = document.createElement('small'); note.className = 'poll-note'; note.textContent = `${total} of 2 voted · tap to vote or change`;
+  container.replaceChildren(question, options, note);
+}
 function paintRow(row, record) {
   // Messages that arrived under a changed security code stay marked until the code is reviewed.
-  const flagged = Boolean(window.App?.flagged?.(record)), key = `${record.status}|${flagged}|${record.createdAt}|${record.text}`;
+  const flagged = Boolean(window.App?.flagged?.(record)), key = `${record.status}|${flagged}|${record.createdAt}|${record.text}|${JSON.stringify(record.votes || null)}|${peerName}|${window.Emoji?.revision || 0}`;
   if (row.dataset.paint === key) return;
   row.dataset.paint = key; row.dataset.status = record.status; row.classList.toggle('flagged', flagged);
-  row.querySelector('.message-text').textContent = record.text; // System lines can be updated in place.
+  const body = row.querySelector('.message-text');
+  if (record.kind === 'poll') paintPoll(body, record);
+  // An action reads as a sentence on both sides ("alice waves"); a guest's own line, with no username, reads "You: waves".
+  else if (record.kind === 'action') body.textContent = record.direction === 'outgoing' ? `${window.App?.myName || 'You:'} ${record.text}` : `${who(record)} ${record.text}`;
+  else if (record.direction !== 'system' && window.Emoji) {
+    const size = window.Emoji.render(body, record.text); row.dataset.emoji = size;
+    // A `:name:` this device does not know yet may be a custom emoji someone just added: refresh the pack.
+    if (/:[a-z0-9_+-]{2,32}:/.test(record.text) && !size) window.App?.onUnknownEmoji?.();
+  }
+  else body.textContent = record.text; // System lines can be updated in place.
   const label = describe(record, flagged); row.title = label;
   const meta = row.querySelector('.message-meta'); meta.setAttribute('aria-label', label);
   meta.querySelector('.meta-text').textContent = `${flagged ? '⚠ ' : ''}${record.expiresAt ? '⏱ ' : ''}${clock(record.createdAt)}${record.direction === 'outgoing' && record.status === 'uncertain' ? ' ?' : ''}`;
 }
 function buildRow(record, animate) {
   const row = document.createElement('li'); row.className = record.direction;
+  if (record.kind) row.classList.add(`kind-${record.kind}`);
   if (animate) row.classList.add('enter');
   row.dataset.messageId = record.id;
-  const text = document.createElement('p'); text.className = 'message-text'; text.textContent = record.text;
+  const text = document.createElement(record.kind === 'poll' ? 'div' : 'p'); text.className = 'message-text';
   const meta = document.createElement('small'); meta.className = 'message-meta';
   const metaText = document.createElement('span'); metaText.className = 'meta-text'; meta.append(metaText);
   if (record.direction === 'outgoing') meta.append((tickTemplate ||= tickIcon()).cloneNode(true));
@@ -168,7 +197,7 @@ function attachChat(peer, channel) {
       const pending = records.filter(record => record.conversationId === conversation && record.direction === 'outgoing' && ['queued', 'sent'].includes(record.status) && !sent.has(record.id));
       const next = pending[0];
       more = Boolean(next); // Keep bounded retries while channel backpressure prevents sending.
-      if (next && transmit({ v: 1, type: 'message', id: next.id, text: next.text, createdAt: next.createdAt, expiresAt: next.expiresAt })) {
+      if (next && transmit(messagePayload(next))) {
         sent.add(next.id);
         more = pending.length > 1;
         await window.ChatStore.setStatus(conversation, next.id, 'sent');
@@ -195,6 +224,11 @@ function attachChat(peer, channel) {
       if (!isCurrent()) return;
       const packet = JSON.parse(event.data);
       if (packet?.v === 1 && Object.keys(packet).length === 2 && packet.type === 'burned') { burnAck?.(); return; }
+      if (packet?.type === 'vote') {
+        let type; try { type = window.ChatStore.checkPayload(packet); } catch { type = null; }
+        if (type !== 'vote') throw new Error('Invalid chat packet');
+        await window.ChatStore.vote(conversation, packet.poll, 'peer', packet.option); refreshHistory(); return;
+      }
       if (packet?.v === 1 && Object.keys(packet).length === 2 && packet.type === 'burn') {
         // The other participant burned the conversation: delete our copy and confirm.
         peerBurned = true;
@@ -213,9 +247,12 @@ function attachChat(peer, channel) {
       }
       if (typeof packet.text !== 'string' || !packet.text.trim() || encoder.encode(packet.text).length > 4096 || !Number.isSafeInteger(packet.createdAt) || packet.createdAt < 0 || packet.createdAt > Date.now() + 300000 || !(packet.expiresAt === null || Number.isSafeInteger(packet.expiresAt) && packet.expiresAt > packet.createdAt && packet.expiresAt <= packet.createdAt + 2592000000)) throw new Error('Invalid chat message');
       if (packet.expiresAt !== null && packet.expiresAt <= Date.now()) return;
-      const record = { id: packet.id, conversationId: conversation, direction: 'incoming', text: packet.text, createdAt: packet.createdAt, status: 'delivered', expiresAt: packet.expiresAt };
-      if (existing && (existing.direction !== 'incoming' || existing.text !== record.text || existing.createdAt !== record.createdAt || existing.expiresAt !== record.expiresAt)) throw new Error('Conflicting message identifier');
-      await window.ChatStore.put(record);
+      let shape; try { shape = window.ChatStore.checkPayload(packet); } catch { shape = null; }
+      if (shape !== 'message') throw new Error('Invalid chat message');
+      const rich = packet.kind === 'poll' ? { kind: 'poll', poll: packet.poll } : packet.kind ? { kind: packet.kind } : {};
+      const record = { id: packet.id, conversationId: conversation, direction: 'incoming', text: packet.text, createdAt: packet.createdAt, status: 'delivered', expiresAt: packet.expiresAt, ...rich };
+      if (existing && (existing.direction !== 'incoming' || existing.text !== record.text || existing.createdAt !== record.createdAt || existing.expiresAt !== record.expiresAt || existing.kind !== record.kind)) throw new Error('Conflicting message identifier');
+      try { await window.ChatStore.put(record); } catch (error) { throw existing ? error : new Error('Invalid chat message'); }
       if (!isCurrent()) return;
       // The acknowledgment means durable receiver storage, never merely arrival.
       // Deduplicate and bound the queue; ordinary channel backpressure is retried.
@@ -227,6 +264,13 @@ function attachChat(peer, channel) {
   if (channel.readyState === 'open') channel.onopen();
 }
 
+/** The wire form of a stored outgoing message: plain, a /me action or a poll (votes stay local). */
+function messagePayload(record) {
+  const payload = { v: 1, type: 'message', id: record.id, text: record.text, createdAt: record.createdAt, expiresAt: record.expiresAt };
+  if (record.kind) payload.kind = record.kind;
+  if (record.kind === 'poll') payload.poll = record.poll;
+  return payload;
+}
 function send(message) {
   if (socket?.readyState !== WebSocket.OPEN) return false;
   if (message.type === 'description' || message.type === 'candidate') {
@@ -585,32 +629,121 @@ window.addEventListener('hashchange', () => {
   try { openInvitation(incoming); } catch (error) { status(error.message); }
 });
 $('history-select').onchange = () => { selectedHistory = $('history-select').value; refreshHistory(); };
+/** Saves an outgoing message (plain, /me action or poll) and hands it to the right transport. */
+async function queueMessage({ text, kind, poll }) {
+  if (!kind && window.Emoji) text = window.Emoji.expand(text); // ":smile:" becomes 😄 on send; custom ones stay as :name:.
+  if (!text.trim() || encoder.encode(text).length > 4096) throw new Error('Enter a message up to 4096 UTF-8 bytes.');
+  const createdAt = Date.now(), duration = Number($('disappear').value) || 0;
+  const rich = kind === 'poll' ? { kind, poll } : kind ? { kind } : {};
+  await window.ChatStore.put({ id: crypto.randomUUID(), conversationId, direction: 'outgoing', text, createdAt, status: 'queued', expiresAt: duration ? createdAt + duration : null, ...rich });
+  if (accountChat) window.App?.onQueued?.(); // Encrypted and posted to the mailbox by account.js.
+  else if (requestChatFlush?.(), dataChannel?.readyState === 'open') chatStatus('');
+  else chatStatus('Queued on this device. Both participants need a valid invitation and a connection to exchange it.');
+  await refreshHistory();
+}
 $('chat-form').addEventListener('submit', async event => {
   event.preventDefault();
   if (chatBusy || !(validInvite || accountChat) || selectedHistory !== conversationId) return;
-  const text = $('chat-input').value;
+  let text = $('chat-input').value;
+  window.Commands?.close();
+  // "/command …" runs here and is never sent; "//text" sends text that starts with a slash.
+  if (window.Commands?.parse(text)) {
+    chatBusy = true; updateComposer();
+    try {
+      const result = await window.Commands.run(text.trim(), commandContext());
+      if (result.ok) { if ($('chat-input').value === text) { $('chat-input').value = ''; resizeComposer(); } }
+      else chatStatus(result.error);
+    } finally { chatBusy = false; updateComposer(); $('chat-input').focus?.(); }
+    return;
+  }
+  if (text.startsWith('//')) text = text.slice(1);
   if (!text.trim() || encoder.encode(text).length > 4096) { chatStatus('Enter a message up to 4096 UTF-8 bytes.'); return; }
   chatBusy = true; updateComposer();
   const send = $('chat-send'); if (send.classList) { const fly = send.classList.contains('fly-a') ? 'fly-b' : 'fly-a'; send.classList.remove('fly-a', 'fly-b'); send.classList.add(fly); }
   // Clear at once so typing can continue; restore the text only if saving fails and nothing new was typed.
+  const typed = $('chat-input').value;
   $('chat-input').value = ''; resizeComposer(); $('chat-input').focus?.();
-  const createdAt = Date.now(), duration = Number($('disappear').value) || 0;
-  try {
-    await window.ChatStore.put({ id: crypto.randomUUID(), conversationId, direction: 'outgoing', text, createdAt, status: 'queued', expiresAt: duration ? createdAt + duration : null });
-    if (accountChat) window.App?.onQueued?.(); // Encrypted and posted to the mailbox by account.js.
-    else if (requestChatFlush?.(), dataChannel?.readyState === 'open') chatStatus('');
-    else chatStatus('Queued on this device. Both participants need a valid invitation and a connection to exchange it.');
-    await refreshHistory();
-  } catch (error) {
+  try { await queueMessage({ text }); }
+  catch (error) {
     chatStatus(error.message || 'Could not save this message.');
-    if (!$('chat-input').value) { $('chat-input').value = text; resizeComposer(); }
+    if (!$('chat-input').value) { $('chat-input').value = typed; resizeComposer(); }
   }
   finally { chatBusy = false; updateComposer(); $('chat-input').focus?.(); }
+});
+// ---------- Slash commands ----------
+// Commands act only through this context: the same buttons and storage the visible UI uses.
+let commandConfirm = null;
+function confirmDialog(title, text, yes) {
+  $('cmd-confirm-title').textContent = title; $('cmd-confirm-text').textContent = text; $('cmd-confirm-yes').textContent = yes;
+  $('cmd-confirm').hidden = false; $('cmd-confirm-yes').focus?.();
+  return new Promise(resolve => { commandConfirm = resolve; });
+}
+const answerConfirm = value => { $('cmd-confirm').hidden = true; commandConfirm?.(value); commandConfirm = null; };
+$('cmd-confirm-yes').onclick = () => answerConfirm(true);
+$('cmd-confirm-cancel').onclick = () => answerConfirm(false);
+const reminderKey = () => `reminders-v1:${window.App?.accountId || 'guest'}`;
+const readReminders = () => { try { const list = JSON.parse(localStorage.getItem(reminderKey()) || '[]'); return Array.isArray(list) ? list.slice(-100) : []; } catch { return []; } };
+const writeReminders = list => { try { localStorage.setItem(reminderKey(), JSON.stringify(list.slice(-100))); } catch {} };
+const reminderTimers = new Map();
+/** Local reminders fire on this device only: a notification if allowed, and a line in that chat. */
+function scheduleReminders() {
+  for (const timer of reminderTimers.values()) clearTimeout(timer);
+  reminderTimers.clear();
+  for (const reminder of readReminders()) {
+    if (!reminder || typeof reminder.id !== 'string' || !Number.isSafeInteger(reminder.at) || typeof reminder.text !== 'string' || typeof reminder.conversationId !== 'string') continue;
+    reminderTimers.set(reminder.id, setTimeout(async () => {
+      writeReminders(readReminders().filter(value => value.id !== reminder.id)); reminderTimers.delete(reminder.id);
+      try { await window.ChatStore.note(reminder.conversationId, reminder.id, `⏰ Reminder: ${reminder.text}`); } catch {}
+      chatStatus(`⏰ Reminder: ${reminder.text}`);
+      try {
+        if (globalThis.Notification?.permission === 'granted') {
+          const registration = await navigator.serviceWorker?.getRegistration?.();
+          if (registration) await registration.showNotification('Reminder', { body: reminder.text, tag: reminder.id });
+          else new Notification('Reminder', { body: reminder.text });
+        }
+      } catch {}
+      refreshHistory();
+    }, Math.max(0, Math.min(reminder.at - Date.now(), 2147483000))));
+  }
+}
+function commandContext() {
+  const where = accountChat ? 'account' : validInvite ? 'guest' : 'none';
+  const context = {
+    where, active,
+    send: message => queueMessage(message),
+    /** Presses an existing control, so a command can do exactly what its button does and nothing more. */
+    press(id, disabledHint) { const control = $(id); if (!control || control.disabled) return { error: disabledHint || 'Not available right now.' }; control.click(); },
+    setTimer(value) { $('disappear').value = value; $('disappear').dispatchEvent(new Event('change')); },
+    setTheme: name => Boolean(window.Theme?.setChatPreset?.(name)),
+    notice: text => chatStatus(text),
+    confirm: confirmDialog,
+    async clearChat() { await window.ChatStore.removeConversation(conversationId); transcriptSignature = ''; await refreshHistory(); chatStatus('Chat history cleared on this device.'); },
+    remind(at, text) { writeReminders([...readReminders(), { id: crypto.randomUUID(), at, text: text.slice(0, 500), conversationId }]); scheduleReminders(); },
+    showHelp: () => window.Commands.showHelp(context),
+    compose(text) { const input = $('chat-input'); input.value = text; input.focus?.(); input.setSelectionRange?.(text.length, text.length); input.dispatchEvent(new Event('input')); },
+  };
+  return context;
+}
+// A tap on a poll option votes (or changes the vote); account chats send it end to end, guest rooms over the live channel.
+$('chat-log').addEventListener('click', async event => {
+  const button = event.target.closest?.('.poll-option');
+  if (!button || selectedHistory !== conversationId) return;
+  const option = Number(button.dataset.option), poll = button.dataset.poll;
+  try {
+    if (accountChat) await window.App.onVote(poll, option);
+    else {
+      if (dataChannel?.readyState !== 'open') { chatStatus('Connect to the other person to vote.'); return; }
+      dataChannel.send(JSON.stringify({ v: 1, type: 'vote', id: crypto.randomUUID(), poll, option }));
+    }
+    await window.ChatStore.vote(conversationId, poll, 'me', option);
+    refreshHistory();
+  } catch (error) { chatStatus(error.message || 'Could not send your vote.'); }
 });
 // Single-row composer that grows with its text; Enter sends on devices with a keyboard.
 function resizeComposer() { const input = $('chat-input'); if (!input.style) return; input.style.height = 'auto'; input.style.height = `${Math.min(input.scrollHeight, 160)}px`; }
 $('chat-input').oninput = resizeComposer;
 $('chat-input').onkeydown = event => {
+  if (window.Commands?.keydown(event)) return;
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && matchMedia('(pointer: fine)').matches) { event.preventDefault(); $('chat-form').requestSubmit(); }
 };
 const disappearingPreferenceKey = 'private-chat-disappearing-v1';
@@ -659,7 +792,8 @@ else {
   // Hooks for account.js: contact conversations reuse this call and chat engine unchanged.
 window.App = {
   get active() { return active; }, get roomId() { return roomId; }, get conversationId() { return conversationId; },
-  status, chatStatus, refreshHistory, view,
+  status, chatStatus, refreshHistory, view, messagePayload, accountId: null, myName: null,
+  rescheduleReminders: () => scheduleReminders(),
   openConversation(next) {
     if (active && conversationId !== next.conversationId) throw new Error('busy');
     conversationId = selectedHistory = next.conversationId; peerName = next.peerName; accountChat = true; transcriptSignature = '';
@@ -681,3 +815,5 @@ window.App = {
   leave() { if (active) cleanup('Conversation closed.'); },
 };
 refreshHistory();
+window.Commands?.attach($('chat-input'), $('cmd-popup'), commandContext);
+scheduleReminders();

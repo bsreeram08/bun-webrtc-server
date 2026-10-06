@@ -163,6 +163,15 @@
     use(chatId) { currentChat = chatId || null; apply(); },
     setAccount(id) { account = id || 'guest'; prefs = load(); apply(); },
     open,
+    /** /theme: sets this conversation's preset by key or display name; 'default' returns it to the app theme. */
+    setChatPreset(name) {
+      const wanted = String(name || '').toLowerCase();
+      const key = wanted === 'default' ? 'default' : Object.keys(PRESETS).find(id => id === wanted || PRESETS[id].name.toLowerCase() === wanted);
+      if (!key || !currentChat) return false;
+      const entry = prefs.chats[currentChat] ||= {};
+      if (key === 'default') { delete entry.preset; delete entry.accent; } else { entry.preset = key; delete entry.accent; }
+      save(); apply(); return true;
+    },
   });
   currentChat = window.App?.conversationId || null; // A call link opened before this script loaded.
   apply();

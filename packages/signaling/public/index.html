@@ -8,6 +8,8 @@
   <script src="/verify.js" defer></script>
   <script src="/signal.js" defer></script>
   <script src="/vendor/simplewebauthn-browser.js" defer></script>
+  <script src="/emoji.js" defer></script>
+  <script src="/commands.js" defer></script>
   <script src="/app.js" defer></script>
   <script src="/theme.js" defer></script>
   <script src="/alerts.js" defer></script>
@@ -160,6 +162,12 @@
     <div class="dialog-actions"><button id="theme-done" class="primary" type="button">Done</button></div>
   </div></div>
 
+  <div id="cmd-confirm" class="dialog" role="alertdialog" aria-labelledby="cmd-confirm-title" hidden><div class="dialog-card">
+    <h2 id="cmd-confirm-title">Are you sure?</h2>
+    <p id="cmd-confirm-text"></p>
+    <div class="dialog-actions"><button id="cmd-confirm-cancel" type="button">Cancel</button><button id="cmd-confirm-yes" class="danger" type="button">Continue</button></div>
+  </div></div>
+
   <div id="rotate-confirm" class="dialog" role="alertdialog" aria-labelledby="rotate-title" hidden><div class="dialog-card">
     <h2 id="rotate-title">Reset secure session?</h2>
     <p>Starts fresh encryption keys for this chat with a new handshake. Your security code stays the same, and messages already on their way still arrive.</p>
@@ -187,6 +195,7 @@
     <ol id="chat-log" aria-label="Messages" aria-live="polite" aria-relevant="additions text"></ol>
     <p id="chat-status" role="status" aria-live="polite">Open an invitation to send messages. Saved history is available on this device.</p>
     <form id="chat-form" class="composer">
+      <ul id="cmd-popup" class="cmd-popup" role="listbox" aria-label="Suggestions" hidden></ul>
       <label for="disappear" class="timer" title="Disappearing messages"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="13" r="8"/><path d="M9 2h6"/><path class="hand" d="M12 13V8.5"/></svg><span class="sr-only">Disappear after</span>
         <select id="disappear"><option value="off">Off</option><option value="3600000">1h</option><option value="86400000">24h</option><option value="604800000">7d</option></select></label>
       <label for="chat-input" class="sr-only">Message</label><textarea id="chat-input" rows="1" maxlength="4096" placeholder="Message" disabled></textarea>
@@ -210,6 +219,16 @@
       <p id="security-status" class="note" role="status" aria-live="polite"></p>
       <p class="note">New identity keys are only for a device you think was exposed: every contact sees your security code change.</p>
       <button id="identity-reset" class="danger-text" type="button">Generate new identity keys</button>
+    </div>
+    <div class="account-only emoji-settings">
+      <h3>Custom emoji</h3>
+      <p class="note">Shared with everyone on this server. Messages only carry <code>:name:</code>; each person's app shows the image.</p>
+      <label for="emoji-name">Name</label><input id="emoji-name" type="text" autocomplete="off" spellcheck="false" autocapitalize="off" maxlength="32" placeholder="party_parrot">
+      <label for="emoji-file">Image file (PNG, GIF or WebP, up to 512 KB)</label><input id="emoji-file" type="file" accept="image/png,image/gif,image/webp">
+      <label for="emoji-url">…or an image address from slackmojis.com</label><input id="emoji-url" type="url" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="https://emojis.slackmojis.com/emojis/images/…/party_parrot.gif">
+      <div class="emoji-actions"><img id="emoji-preview" class="custom-emoji big" alt="" hidden><button id="emoji-add" type="button">Add emoji</button></div>
+      <p id="emoji-status" class="note" role="status" aria-live="polite"></p>
+      <ul id="emoji-list" class="emoji-list" aria-label="Custom emoji"></ul>
     </div>
     <h3>Appearance</h3>
     <p>Themes, accent colour and chat wallpaper. Stored on this device only.</p>
