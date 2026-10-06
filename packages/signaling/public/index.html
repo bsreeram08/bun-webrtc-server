@@ -9,6 +9,7 @@
   <script src="/signal.js" defer></script>
   <script src="/vendor/simplewebauthn-browser.js" defer></script>
   <script src="/app.js" defer></script>
+  <script src="/theme.js" defer></script>
   <script src="/alerts.js" defer></script>
   <script src="/account.js" defer></script>
   <script src="/install.js" defer></script>
@@ -21,7 +22,7 @@
     <button id="conv-voice" class="icon-button" type="button" aria-label="Voice call"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></svg></button>
     <button id="conv-video" class="icon-button" type="button" aria-label="Video call"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg></button>
     <details id="conv-menu" class="menu"><summary aria-label="Conversation options"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></summary>
-      <div class="menu-panel"><button id="conv-safety" type="button">Security code</button><button id="conv-burn" class="danger-text" type="button" disabled>Burn conversation</button><button id="conv-remove" class="danger-text" type="button">Remove contact</button></div></details>
+      <div class="menu-panel"><button id="conv-safety" type="button">Security code</button><button id="conv-theme" type="button">Chat theme</button><button id="conv-burn" class="danger-text" type="button" disabled>Burn conversation</button><button id="conv-remove" class="danger-text" type="button">Remove contact</button></div></details>
   </header>
   <div id="key-banner" class="key-banner" role="alert" hidden>
     <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 8v4M12 16h.01"/></svg>
@@ -30,12 +31,13 @@
 
   <div class="topbar session-only">
     <div id="verify-code" class="verify" role="status" aria-live="polite" data-kind="pending" hidden>
-      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      <svg class="icon shield" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path class="check" d="M8.5 12.2l2.4 2.4 4.6-4.8" pathLength="1"/></svg>
       <span class="verify-text"><strong id="verify-digits"></strong><span id="verify-label"></span></span>
     </div>
     <details id="menu" class="menu"><summary aria-label="More options"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></summary>
       <div class="menu-panel">
         <button id="settings-open" type="button">Backup and settings</button>
+        <button id="theme-open" type="button">Chat theme</button>
         <button id="burn" class="danger-text" type="button" disabled>Burn conversation</button>
       </div>
     </details>
@@ -115,8 +117,8 @@
 
   <div class="controls session-only" aria-label="Call controls">
     <button id="play" class="round" hidden aria-label="Play incoming audio"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/></svg><span class="cap" aria-hidden="true">Audio</span></button>
-    <button id="mute" class="round call-only" disabled aria-pressed="false" aria-label="Mute microphone"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></svg><span id="mute-cap" class="cap" aria-hidden="true">Mute</span></button>
-    <button id="camera" class="round call-only" disabled aria-pressed="false" aria-label="Turn camera off"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg><span id="camera-cap" class="cap" aria-hidden="true">Camera</span></button>
+    <button id="mute" class="round call-only" disabled aria-pressed="false" aria-label="Mute microphone"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/><path class="slash" d="M3 3l18 18" pathLength="1"/></svg><span id="mute-cap" class="cap" aria-hidden="true">Mute</span></button>
+    <button id="camera" class="round call-only" disabled aria-pressed="false" aria-label="Turn camera off"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/><path class="slash" d="M2 2l20 20" pathLength="1"/></svg><span id="camera-cap" class="cap" aria-hidden="true">Camera</span></button>
     <button id="chat-toggle" class="round call-only" type="button" aria-expanded="false" aria-label="Messages"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><span class="cap" aria-hidden="true">Chat</span></button>
     <button id="hangup" class="round end" disabled aria-label="End call"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/></svg><span class="cap" aria-hidden="true">End</span></button>
   </div>
@@ -130,7 +132,11 @@
   <div id="incoming" class="dialog" role="alertdialog" aria-labelledby="incoming-title" aria-describedby="incoming-kind" hidden><div class="dialog-card incoming-card">
     <span id="incoming-avatar" class="avatar big" aria-hidden="true"></span>
     <h2 id="incoming-title"></h2><p id="incoming-kind"></p>
-    <div class="dialog-actions"><button id="incoming-decline" class="danger">Decline</button><button id="incoming-accept" class="primary">Accept</button></div>
+    <div class="dialog-actions incoming-actions">
+      <button id="incoming-decline" class="danger"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path class="handset" d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/></svg><span>Decline</span></button>
+      <button id="incoming-accept-audio" class="secondary" hidden><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></svg><span>Audio only</span></button>
+      <button id="incoming-accept" class="primary"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg><span id="incoming-accept-label">Accept</span></button>
+    </div>
   </div></div>
 
   <div id="safety" class="dialog" role="dialog" aria-modal="true" aria-labelledby="safety-title" hidden><div class="dialog-card">
@@ -138,6 +144,14 @@
     <p id="safety-number" class="safety-number"></p>
     <p id="safety-state"></p>
     <div class="dialog-actions"><button id="safety-close" type="button">Close</button><button id="safety-accept" type="button" hidden>Accept new code</button><button id="safety-verify" class="primary" type="button">Mark as verified</button></div>
+  </div></div>
+
+  <div id="theme-dialog" class="dialog" role="dialog" aria-modal="true" aria-labelledby="theme-title" hidden><div class="dialog-card theme-card">
+    <h2 id="theme-title">Theme</h2><p id="theme-note" class="note"></p>
+    <h3 id="theme-presets-label">Theme</h3><div id="theme-presets" class="swatches" role="radiogroup" aria-labelledby="theme-presets-label"></div>
+    <h3>Accent</h3><div class="accent-row"><label for="theme-accent" class="sr-only">Accent colour</label><input id="theme-accent" type="color" value="#a1efce"><span class="note">Bubbles, ticks and buttons follow it, kept readable.</span><button id="theme-accent-reset" class="link" type="button" hidden>Reset</button></div>
+    <h3 id="theme-walls-label">Wallpaper</h3><div id="theme-walls" class="walls" role="radiogroup" aria-labelledby="theme-walls-label"></div>
+    <div class="dialog-actions"><button id="theme-done" class="primary" type="button">Done</button></div>
   </div></div>
 
   <div id="remove-confirm" class="dialog" role="alertdialog" aria-labelledby="remove-title" hidden><div class="dialog-card">
@@ -155,10 +169,10 @@
     <ol id="chat-log" aria-label="Messages" aria-live="polite" aria-relevant="additions text"></ol>
     <p id="chat-status" role="status" aria-live="polite">Open an invitation to send messages. Saved history is available on this device.</p>
     <form id="chat-form" class="composer">
-      <label for="disappear" class="timer" title="Disappearing messages"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2M9 2h6"/></svg><span class="sr-only">Disappear after</span>
+      <label for="disappear" class="timer" title="Disappearing messages"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="13" r="8"/><path d="M9 2h6"/><path class="hand" d="M12 13V8.5"/></svg><span class="sr-only">Disappear after</span>
         <select id="disappear"><option value="off">Off</option><option value="3600000">1h</option><option value="86400000">24h</option><option value="604800000">7d</option></select></label>
       <label for="chat-input" class="sr-only">Message</label><textarea id="chat-input" rows="1" maxlength="4096" placeholder="Message" disabled></textarea>
-      <button id="chat-send" class="send" type="submit" disabled aria-label="Send message"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg></button>
+      <button id="chat-send" class="send" type="submit" disabled aria-label="Send message"><svg class="icon plane" viewBox="0 0 24 24" aria-hidden="true"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg></button>
     </form>
   </section>
 
@@ -170,6 +184,9 @@
       <label class="toggle"><input id="ring-silent" type="checkbox"> Silent: no ringtone or vibration</label>
       <p id="notify-status" class="note" role="status" aria-live="polite"></p>
     </div>
+    <h3>Appearance</h3>
+    <p>Themes, accent colour and chat wallpaper. Stored on this device only.</p>
+    <button id="theme-app" type="button">Theme and wallpaper</button>
     <h3>Encrypted backup</h3>
     <p>Download an encrypted copy of your messages, keep it in Google Drive or anywhere you like, and restore it on another phone with the same password.</p>
     <label for="backup-password">Backup password</label><input id="backup-password" type="password" autocomplete="off" minlength="12" placeholder="At least 12 characters">

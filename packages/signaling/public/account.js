@@ -61,6 +61,7 @@
     say('me-name', `@${user.username}`); say('account-status', '');
     try { unread = JSON.parse(localStorage.getItem(`unread-v1:${me.id}`) || '{}') || {}; } catch { unread = {}; }
     ready = setupKeys(user);
+    window.Theme?.setAccount(user.id);
     loadContacts(); connectEvents(); window.Alerts?.signedIn();
   }
   function signedOut(message = '') {
@@ -68,7 +69,7 @@
     clearTimeout(retryTimer); clearTimeout(flushTimer); const previous = events; events = null; previous?.close();
     if (App.active) App.end(); App.closeConversation(); $('key-banner').hidden = true;
     body.dataset.auth = 'out'; body.dataset.screen = ''; say('account-status', message);
-    hideRing(); stopCalling(); window.Alerts?.signedOut();
+    hideRing(); stopCalling(); window.Alerts?.signedOut(); window.Theme?.setAccount(null);
   }
   async function signOut(everywhere) {
     $('account-menu').open = false;
@@ -459,6 +460,10 @@
     ringing = { ...message, contact, conversationId };
     say('incoming-avatar', initial(contact.username)); say('incoming-title', contact.username);
     say('incoming-kind', message.kind === 'video' ? 'Incoming video call' : 'Incoming voice call');
+    // Video calls can be answered with the microphone only; nothing is captured until one of these is tapped.
+    $('incoming-accept-audio').hidden = message.kind !== 'video';
+    say('incoming-accept-label', message.kind === 'video' ? 'Video' : 'Accept');
+    $('incoming').dataset.kind = message.kind;
     $('incoming').hidden = false; $('incoming-accept').focus();
     Ring.incoming(); acknowledgeRinging();
     clearTimeout(missTimer);
@@ -474,14 +479,16 @@
   }
   document.addEventListener('visibilitychange', acknowledgeRinging);
   function hideRing() { $('incoming').hidden = true; clearTimeout(missTimer); missTimer = undefined; Ring.stop(); }
-  $('incoming-accept').onclick = async () => {
+  async function accept(audioOnly) {
     Ring.unlock();
     const ring = ringing; ringing = null; hideRing();
     if (!ring) return;
     if (App.active) App.leave();
     current = ring.contact; body.dataset.screen = 'conversation'; updateHeader(); updateBanner();
-    await App.start({ roomId: ring.roomId, token: ring.token, kind: ring.kind, conversationId: ring.conversationId, peerName: ring.contact.username });
-  };
+    await App.start({ roomId: ring.roomId, token: ring.token, kind: ring.kind, audioOnly, conversationId: ring.conversationId, peerName: ring.contact.username });
+  }
+  $('incoming-accept').onclick = () => accept(false);
+  $('incoming-accept-audio').onclick = () => accept(true);
   $('incoming-decline').onclick = async () => {
     const ring = ringing; ringing = null; hideRing();
     if (ring) { try { await api(`/api/conversations/${ring.contact.username}/decline`, 'POST', { roomId: ring.roomId }); } catch {} }

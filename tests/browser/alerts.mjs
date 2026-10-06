@@ -31,8 +31,8 @@ async function person() {
   await context.addInitScript(() => {
     Object.defineProperty(Notification, 'permission', { get: () => 'default' });
     const original = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
-    window.mediaRequests = 0;
-    navigator.mediaDevices.getUserMedia = constraints => { window.mediaRequests++; return original(constraints); };
+    window.mediaRequests = 0; window.mediaConstraints = [];
+    navigator.mediaDevices.getUserMedia = constraints => { window.mediaRequests++; window.mediaConstraints.push(constraints); return original(constraints); };
   });
   const page = await context.newPage();
   page.on('pageerror', error => { throw error; });
@@ -101,6 +101,32 @@ try {
   await bob.click('#incoming-accept');
   await until(bob, start => window.mediaRequests === start + 1, before);
   step('notification/link open intent never answers: sheet keeps ringing and media starts only on Accept');
+  await alice.click('#hangup');
+  await until(bob, () => document.getElementById('app').dataset.state !== 'call');
+
+  // A video call can be answered with the microphone only, and the camera added later.
+  await alice.click('#conv-video');
+  await visible(bob, '#incoming');
+  if (!await bob.isVisible('#incoming-accept-audio')) throw new Error('No audio-only option on a video call');
+  await bob.waitForTimeout(400); await shot(bob, '4-incoming-video');
+  const asked = await bob.evaluate(() => window.mediaConstraints.length);
+  await bob.click('#incoming-accept-audio');
+  await until(alice, () => document.getElementById('status').textContent.includes('live')).catch(async error => {
+    for (const page of [alice, bob]) console.error(await page.evaluate(() => ({ status: document.getElementById('status').textContent, ...document.getElementById('app').dataset })));
+    throw error;
+  });
+  const answered = await bob.evaluate(index => window.mediaConstraints[index], asked);
+  if (answered?.video !== false || answered?.audio !== true) throw new Error(`Audio-only accept asked for ${JSON.stringify(answered)}`);
+  await until(bob, () => document.getElementById('app').dataset.local === 'off' && document.getElementById('app').dataset.remote === 'on');
+  await until(alice, () => document.getElementById('app').dataset.remote === 'off' && document.getElementById('app').dataset.local === 'on');
+  await until(alice, () => document.getElementById('remote').srcObject?.getAudioTracks().some(track => track.readyState === 'live' && !track.muted));
+  await alice.waitForTimeout(600); await shot(alice, '5-audio-only-caller'); await shot(bob, '6-audio-only-callee');
+  step('video call accepted audio only: no camera captured, caller sees an avatar, audio flows');
+  await bob.click('#camera');
+  await until(bob, () => document.getElementById('app').dataset.local === 'on');
+  await until(alice, () => document.getElementById('app').dataset.remote === 'on');
+  if ((await bob.evaluate(() => window.mediaConstraints.at(-1)))?.video !== true) throw new Error('Camera button did not capture video');
+  step('turning the camera on later adds video for the caller');
   await alice.click('#hangup');
   await until(bob, () => document.getElementById('app').dataset.state !== 'call');
 

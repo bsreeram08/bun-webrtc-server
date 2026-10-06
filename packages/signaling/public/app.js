@@ -35,7 +35,7 @@ function openInvitation(value) {
   const next = parseInvitation(value);
   lifecycle++; roomId = next.id; token = next.credential; validInvite = true; conversationId = selectedHistory = roomId; peerBurned = false; accountChat = false; peerName = 'the other participant';
   $('invitation-input').value = ''; $('invitation-panel').open = false;
-  setJoinable(true);
+  setJoinable(true); window.Theme?.use(conversationId);
   status('Invitation ready. Choose how to join.');
   refreshHistory();
 }
@@ -45,6 +45,62 @@ function updateComposer() {
   $('chat-input').disabled = !canCompose;
   $('chat-send').disabled = !canCompose || chatBusy;
   $('burn').disabled = $('conv-burn').disabled = !(validInvite || accountChat) || chatBusy;
+}
+// The transcript is keyed by message id: new rows are appended, statuses change in place and
+// removed rows go, so a 5-second poll touches almost nothing and only real changes animate.
+const SVG = 'http://www.w3.org/2000/svg';
+let rendered = { conversation: null, rows: new Map() }, tickTemplate = null;
+function svgNode(tag, attributes) { const node = document.createElementNS(SVG, tag); for (const [key, value] of Object.entries(attributes)) node.setAttribute(key, value); return node; }
+function tickIcon() {
+  // Two checks that draw in with stroke-dashoffset, and a small clock for queued messages.
+  const svg = svgNode('svg', { class: 'ticks', viewBox: '0 0 18 12', 'aria-hidden': 'true' });
+  svg.append(svgNode('path', { class: 'tick-one', d: 'M1.5 6.5l3 3 6-7', pathLength: '1' }), svgNode('path', { class: 'tick-two', d: 'M7.5 9.5l6-7', pathLength: '1' }),
+    svgNode('circle', { class: 'tick-clock', cx: '9', cy: '6', r: '4.2' }), svgNode('path', { class: 'tick-clock tick-hand', d: 'M9 3.6V6l1.6 1' }));
+  return svg;
+}
+function describe(record, flagged) {
+  const delivery = { queued: 'Queued on this device', sent: 'Sent · delivery unconfirmed', delivered: 'Delivered to device', uncertain: 'Restored · delivery unconfirmed' }[record.status];
+  const detail = `${record.direction === 'outgoing' ? 'You' : peerName === 'the other participant' ? 'Other participant' : peerName} · ${new Date(record.createdAt).toLocaleString()} · ${delivery}${record.expiresAt ? ' · Disappears ' + new Date(record.expiresAt).toLocaleString() : ''}`;
+  return flagged ? `${detail} · Sent under a new security code` : detail;
+}
+function paintRow(row, record) {
+  // Messages that arrived under a changed security code stay marked until the code is reviewed.
+  const flagged = Boolean(window.App?.flagged?.(record)), key = `${record.status}|${flagged}`;
+  if (row.dataset.paint === key) return;
+  row.dataset.paint = key; row.dataset.status = record.status; row.classList.toggle('flagged', flagged);
+  const label = describe(record, flagged); row.title = label;
+  const meta = row.querySelector('.message-meta'); meta.setAttribute('aria-label', label);
+  meta.querySelector('.meta-text').textContent = `${flagged ? '⚠ ' : ''}${record.expiresAt ? '⏱ ' : ''}${clock(record.createdAt)}${record.direction === 'outgoing' && record.status === 'uncertain' ? ' ?' : ''}`;
+}
+function buildRow(record, animate) {
+  const row = document.createElement('li'); row.className = record.direction;
+  if (animate) row.classList.add('enter');
+  row.dataset.messageId = record.id;
+  const text = document.createElement('p'); text.className = 'message-text'; text.textContent = record.text;
+  const meta = document.createElement('small'); meta.className = 'message-meta';
+  const metaText = document.createElement('span'); metaText.className = 'meta-text'; meta.append(metaText);
+  if (record.direction === 'outgoing') meta.append((tickTemplate ||= tickIcon()).cloneNode(true));
+  row.append(text, meta); paintRow(row, record);
+  return row;
+}
+function renderTranscript(visible) {
+  const log = $('chat-log'), wasNearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+  // A different conversation (or a forced refresh) is a fresh, motionless render.
+  const fresh = rendered.conversation !== selectedHistory || transcriptSignature === '';
+  if (fresh) { log.replaceChildren(); rendered = { conversation: selectedHistory, rows: new Map() }; transcriptSignature = 'live'; }
+  const keep = new Set();
+  let previous = null;
+  for (const record of visible) {
+    let row = rendered.rows.get(record.id);
+    if (!row) { row = buildRow(record, !fresh); rendered.rows.set(record.id, row); }
+    else paintRow(row, record);
+    keep.add(record.id);
+    // Keep document order equal to message order with the fewest moves (normally none).
+    if ((previous ? previous.nextSibling : log.firstChild) !== row) log.insertBefore(row, previous ? previous.nextSibling : log.firstChild);
+    previous = row;
+  }
+  for (const [id, row] of rendered.rows) if (!keep.has(id)) { row.remove(); rendered.rows.delete(id); }
+  if (fresh || wasNearBottom) log.scrollTop = log.scrollHeight;
 }
 async function refreshHistory() {
   const revision = ++historyRevision;
@@ -61,29 +117,7 @@ async function refreshHistory() {
     for (const id of ids) selector.add(new Option(id === conversationId ? 'This conversation' : `Earlier conversation — ${new Date(lastAt.get(id)).toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${clock(lastAt.get(id))}`, id));
     view('history', ids.length ? 'yes' : 'no');
     selector.value = selectedHistory;
-    const log = $('chat-log'), wasNearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
-    const visible = records.filter(record => record.conversationId === selectedHistory).slice(-2000);
-    const signature = JSON.stringify(visible);
-    if (transcriptSignature !== signature) {
-      transcriptSignature = signature; log.replaceChildren();
-      for (const record of visible) {
-        const row = document.createElement('li'); row.className = record.direction;
-        row.dataset.messageId = record.id; row.dataset.status = record.status;
-        const text = document.createElement('p'); text.className = 'message-text'; text.textContent = record.text;
-        const meta = document.createElement('small'); meta.className = 'message-meta';
-        const delivery = { queued: 'Queued on this device', sent: 'Sent · delivery unconfirmed', delivered: 'Delivered to device', uncertain: 'Restored · delivery unconfirmed' }[record.status];
-        const detail = `${record.direction === 'outgoing' ? 'You' : peerName === 'the other participant' ? 'Other participant' : peerName} · ${new Date(record.createdAt).toLocaleString()} · ${delivery}${record.expiresAt ? ' · Disappears ' + new Date(record.expiresAt).toLocaleString() : ''}`;
-        const mark = record.direction === 'outgoing' ? { queued: ' 🕓', sent: ' ✓', delivered: ' ✓✓', uncertain: ' ?' }[record.status] : '';
-        // Messages that arrived under a changed security code stay marked until the code is reviewed.
-        const flagged = Boolean(window.App?.flagged?.(record));
-        meta.textContent = `${flagged ? '⚠ ' : ''}${record.expiresAt ? '⏱ ' : ''}${clock(record.createdAt)}${mark}`;
-        if (flagged) row.classList.add('flagged');
-        const label = flagged ? `${detail} · Sent under a new security code` : detail;
-        meta.setAttribute('aria-label', label); row.title = label;
-        row.append(text, meta); log.append(row);
-      }
-      if (wasNearBottom) log.scrollTop = log.scrollHeight;
-    }
+    renderTranscript(records.filter(record => record.conversationId === selectedHistory).slice(-2000));
     updateComposer();
   } catch (error) { chatStatus(error.message || 'Could not read local history.'); $('chat-input').disabled = true; $('chat-send').disabled = true; }
 }
@@ -207,9 +241,16 @@ function closePeer() {
   if (pc) { pc.onconnectionstatechange = null; pc.close(); }
   pc = null; sessionId = null; ready = false; candidates = [];
   makingOffer = false; ignoreOffer = false; settingAnswer = false; iceRestarts = 0;
-  $('remote').srcObject = null;
+  $('remote').srcObject = null; updateMediaView();
   clearTimeout(verifyTimer); verifyTimer = undefined;
   $('verify-code').hidden = true; $('verify-digits').textContent = ''; $('verify-label').textContent = '';
+}
+/** Layout follows the live video on each side: a camera that is off (or never captured) shows an avatar instead of black video. */
+function updateMediaView() {
+  const local = Boolean(stream?.getVideoTracks().some(track => track.readyState === 'live' && track.enabled));
+  const remote = Boolean($('remote').srcObject?.getVideoTracks?.().some(track => track.readyState === 'live' && !track.muted));
+  view('local', local ? 'on' : 'off'); view('remote', remote ? 'on' : 'off');
+  view('media', local || remote ? 'video' : 'audio');
 }
 function cleanup(message) {
   active = false; sessionPrepared = false; lifecycle++;
@@ -260,6 +301,9 @@ function createPeer() {
     const remote = streams[0] || $('remote').srcObject || new MediaStream();
     if (!remote.getTracks().includes(track)) remote.addTrack(track);
     $('remote').srcObject = remote;
+    // A peer that answers audio only, or turns its camera on later, flips the layout without renegotiating UI.
+    track.onmute = track.onunmute = track.onended = () => { if (pc === peer) updateMediaView(); };
+    updateMediaView();
     $('remote').play().catch(() => { if (pc === peer) $('play').hidden = false; });
   };
   peer.onconnectionstatechange = () => {
@@ -429,11 +473,13 @@ async function join(choice) {
       if (!active || current !== lifecycle) { acquired.getTracks().forEach(track => track.stop()); return; }
       stream = acquired; $('local').srcObject = stream;
     }
+    updateMediaView();
     if (!active || current !== lifecycle) return;
     sessionPrepared = true;
-    $('mute').disabled = !stream; $('camera').disabled = !stream?.getVideoTracks().length;
+    // The camera button stays usable on audio-only calls: it can capture and add video later.
+    $('mute').disabled = !stream; $('camera').disabled = !stream;
     $('mute').setAttribute('aria-pressed', 'false'); $('mute').setAttribute('aria-label', 'Mute microphone'); $('mute-cap').textContent = 'Mute';
-    $('camera').setAttribute('aria-pressed', 'false'); $('camera').setAttribute('aria-label', 'Turn camera off'); $('camera-cap').textContent = 'Camera';
+    setCameraButton(!stream?.getVideoTracks().length);
     await connectSocket(current);
   } catch (error) {
     if (current !== lifecycle) return;
@@ -446,10 +492,27 @@ $('mute').onclick = () => {
   stream?.getAudioTracks().forEach(track => { track.enabled = !muted; });
   $('mute').setAttribute('aria-pressed', String(muted)); $('mute').setAttribute('aria-label', muted ? 'Unmute microphone' : 'Mute microphone'); $('mute-cap').textContent = muted ? 'Unmute' : 'Mute';
 };
-$('camera').onclick = () => {
-  const off = $('camera').getAttribute('aria-pressed') !== 'true';
-  stream?.getVideoTracks().forEach(track => { track.enabled = !off; });
+function setCameraButton(off) {
   $('camera').setAttribute('aria-pressed', String(off)); $('camera').setAttribute('aria-label', off ? 'Turn camera on' : 'Turn camera off'); $('camera-cap').textContent = off ? 'Camera on' : 'Camera';
+}
+$('camera').onclick = async () => {
+  if (!stream) return;
+  if (!stream.getVideoTracks().length) {
+    // Joined audio only: capture the camera now (this tap is the consent) and renegotiate to send it.
+    const current = lifecycle; $('camera').disabled = true;
+    try {
+      const track = (await navigator.mediaDevices.getUserMedia({ video: true })).getVideoTracks()[0];
+      if (!active || current !== lifecycle || !stream) { track.stop(); return; }
+      stream.addTrack(track); $('local').srcObject = null; $('local').srcObject = stream;
+      if (pc) pc.addTrack(track, stream);
+      setCameraButton(false);
+    } catch { status('Camera unavailable. Check the camera permission and try again.'); }
+    finally { if (current === lifecycle) $('camera').disabled = false; updateMediaView(); }
+    return;
+  }
+  const off = $('camera').getAttribute('aria-pressed') !== 'true';
+  stream.getVideoTracks().forEach(track => { track.enabled = !off; });
+  setCameraButton(off); updateMediaView();
 };
 $('play').onclick = () => $('remote').play().then(() => { $('play').hidden = true; }).catch(() => status('Use your browser’s audio controls to allow playback.'));
 async function endRoom(ended) {
@@ -524,6 +587,7 @@ $('chat-form').addEventListener('submit', async event => {
   const text = $('chat-input').value;
   if (!text.trim() || encoder.encode(text).length > 4096) { chatStatus('Enter a message up to 4096 UTF-8 bytes.'); return; }
   chatBusy = true; updateComposer();
+  const send = $('chat-send'); if (send.classList) { const fly = send.classList.contains('fly-a') ? 'fly-b' : 'fly-a'; send.classList.remove('fly-a', 'fly-b'); send.classList.add(fly); }
   // Clear at once so typing can continue; restore the text only if saving fails and nothing new was typed.
   $('chat-input').value = ''; resizeComposer(); $('chat-input').focus?.();
   const createdAt = Date.now(), duration = Number($('disappear').value) || 0;
@@ -595,17 +659,19 @@ window.App = {
   openConversation(next) {
     if (active && conversationId !== next.conversationId) throw new Error('busy');
     conversationId = selectedHistory = next.conversationId; peerName = next.peerName; accountChat = true; transcriptSignature = '';
+    window.Theme?.use(conversationId);
     if (!active) { validInvite = false; chatStatus(''); }
     // With a keyboard, opening a chat puts the cursor in the message box (phones keep their keyboard closed).
     refreshHistory().then(() => { if (window.matchMedia?.('(pointer: fine)')?.matches) $('chat-input').focus?.(); });
   },
-  closeConversation() { if (!active) { accountChat = false; conversationId = null; selectedHistory = ''; refreshHistory(); } },
+  closeConversation() { if (!active) { accountChat = false; conversationId = null; selectedHistory = ''; window.Theme?.use(null); refreshHistory(); } },
   async start(next) {
     if (active) { cleanup('Switching conversation…'); }
     lifecycle++; roomId = next.roomId; token = next.token; validInvite = true; peerBurned = false;
-    conversationId = selectedHistory = next.conversationId; peerName = next.peerName; accountChat = true;
+    conversationId = selectedHistory = next.conversationId; peerName = next.peerName; accountChat = true; window.Theme?.use(conversationId);
     $('remote').closest('figure').querySelector('figcaption').textContent = next.peerName;
-    await join(next.kind === 'chat' ? 'chat' : next.kind === 'voice' ? 'audio' : 'video');
+    // audioOnly: a video call answered with the microphone only; the camera can be added later.
+    await join(next.kind === 'chat' ? 'chat' : next.kind === 'voice' || next.audioOnly ? 'audio' : 'video');
   },
   end: () => endRoom('Conversation ended.'),
   leave() { if (active) cleanup('Conversation closed.'); },
