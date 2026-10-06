@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Push (APNs + PushKit VoIP). Switch to "production" for App Store/TestFlight builds. -->
+	<key>aps-environment</key>
+	<string>development</string>
+	<!-- Passkeys and invite links: the server serves /.well-known/apple-app-site-association. -->
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>webcredentials:calls.sreerams.in</string>
+		<string>applinks:calls.sreerams.in</string>
+	</array>
+</dict>
+</plist>
