@@ -15,13 +15,6 @@ import 'package:private_chat/store/message.dart';
 import 'package:private_chat/store/message_store.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
-class _FixedKey implements StoreKeys {
-  _FixedKey(this.key);
-  final List<int> key;
-  @override
-  Future<List<int>> keyFor(String account) async => key;
-}
-
 void main() {
   final env = Platform.environment;
   final base = env['CROSS_BASE'];
@@ -52,7 +45,7 @@ void main() {
     final api = Api(baseUrl: base!, clientName: 'ios')..token = env['CROSS_TOKEN']!;
     final crypto = RustChatCrypto(
       directory: () async => dir,
-      storeKeys: _FixedKey(List<int>.generate(32, (i) => i * 7 % 256)),
+      storeKeys: MemoryStoreKeys(7),
       externalLibrary: ExternalLibrary.open(env['CROSS_DYLIB']!),
     );
     await crypto.init('keys-app');

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart' show ExternalLibrary;
@@ -28,11 +29,15 @@ class RustChatCrypto implements ChatCrypto {
   final ExternalLibrary? externalLibrary;
   static Future<void>? _loaded;
 
+  // A core `storage` error is the key database itself (sealed store refused, row failed to authenticate,
+  // identity missing): fatal for messaging until recovery, never retried into an acknowledgement.
+  CryptoException _map(core.CoreError error) => CryptoException(error.message, code: error.code, keysLocked: error.code == 'storage');
+
   Future<T> _call<T>(Future<T> Function() work) async {
     try {
       return await work();
     } on core.CoreError catch (error) {
-      throw CryptoException(error.message, code: error.code);
+      throw _map(error);
     }
   }
 
@@ -40,16 +45,39 @@ class RustChatCrypto implements ChatCrypto {
     try {
       return work();
     } on core.CoreError catch (error) {
-      throw CryptoException(error.message, code: error.code);
+      throw _map(error);
     }
   }
+
+  Future<String> _path(String name) async => p.join(await _directory(), '$name.sqlite');
 
   @override
   Future<void> init(String name) async {
     await (_loaded ??= RustLib.init(externalLibrary: externalLibrary));
-    final path = p.join(await _directory(), '$name.sqlite');
-    final key = await _storeKeys.keyFor(name);
-    await _call(() => core.init(dbPath: path, storeKey: key));
+    final path = await _path(name);
+    final saved = await _storeKeys.read(name);
+    if (saved == null) {
+      // No store key but a key database on disk (e.g. the keystore was cleared or restored without it):
+      // it can never be opened again. Don't mint a key and a fresh identity over it — ask the user.
+      if (File(path).existsSync()) {
+        throw const CryptoException('The key for this device\'s encrypted messages is missing.', code: 'storage', keysLocked: true);
+      }
+      final created = await _storeKeys.create(name);
+      await _call(() => core.init(dbPath: path, storeKey: created, expectExisting: false));
+      return;
+    }
+    // The keystore holds a key, so the database must exist and authenticate (a deleted one fails closed).
+    await _call(() => core.init(dbPath: path, storeKey: saved, expectExisting: true));
+  }
+
+  @override
+  Future<void> resetLocal(String name) async {
+    final path = await _path(name);
+    for (final suffix in ['', '-wal', '-shm', '-journal']) {
+      final file = File('$path$suffix');
+      if (file.existsSync()) file.deleteSync();
+    }
+    await _storeKeys.delete(name);
   }
 
   @override
@@ -154,20 +182,49 @@ class RustChatCrypto implements ChatCrypto {
 
 /// Where the per-account store key lives.
 abstract class StoreKeys {
-  Future<List<int>> keyFor(String account);
+  /// The saved key, or null when none was ever created (or the keystore lost it).
+  Future<List<int>?> read(String account);
+
+  /// Creates and saves a new random 32-byte key.
+  Future<List<int>> create(String account);
+  Future<void> delete(String account);
 }
 
-/// 32 random bytes per account in the platform keystore, created on first use.
+/// 32 random bytes per account in the platform keystore. Created only for a new key database; a missing
+/// key next to an existing database is reported, never silently replaced.
 class SecureStoreKeys implements StoreKeys {
   final _storage = const FlutterSecureStorage();
+  String _name(String account) => 'chatcore-store-key-v1:$account';
   @override
-  Future<List<int>> keyFor(String account) async {
-    final name = 'chatcore-store-key-v1:$account';
-    final saved = await _storage.read(key: name);
-    if (saved != null) return base64Url.decode(saved);
+  Future<List<int>?> read(String account) async {
+    final saved = await _storage.read(key: _name(account));
+    return saved == null ? null : base64Url.decode(saved);
+  }
+
+  @override
+  Future<List<int>> create(String account) async {
     final random = Random.secure();
     final key = List<int>.generate(32, (_) => random.nextInt(256));
-    await _storage.write(key: name, value: base64Url.encode(key));
+    await _storage.write(key: _name(account), value: base64Url.encode(key));
     return key;
   }
+
+  @override
+  Future<void> delete(String account) => _storage.delete(key: _name(account));
+}
+
+/// In-memory store keys (tests and tools).
+class MemoryStoreKeys implements StoreKeys {
+  MemoryStoreKeys([this.seed]);
+
+  /// When set, newly created keys are deterministic (all bytes = seed).
+  final int? seed;
+  final Map<String, List<int>> keys = {};
+  @override
+  Future<List<int>?> read(String account) async => keys[account];
+  @override
+  Future<List<int>> create(String account) async =>
+      keys[account] = seed == null ? List<int>.generate(32, (_) => Random.secure().nextInt(256)) : List<int>.filled(32, seed!);
+  @override
+  Future<void> delete(String account) async => keys.remove(account);
 }

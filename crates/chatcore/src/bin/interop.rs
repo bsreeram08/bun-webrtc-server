@@ -81,7 +81,7 @@ fn main() {
     let store: Box<dyn chatcore::store::Store> = match path.as_deref() {
         None | Some(":mem:") => Box::new(MemoryStore::default()),
         // Sealed at rest, as the apps run it (a fresh store key per party).
-        Some(path) => Box::new(SqliteStore::open_with_key(path, Some(chatcore::primitives::random_bytes::<32>())).expect("open database")),
+        Some(path) => Box::new(SqliteStore::open_sealed(path, chatcore::primitives::random_bytes::<32>(), chatcore::store::Open::Create).expect("open database")),
     };
     let mut core = Core::new(store);
     let stdin = io::stdin();

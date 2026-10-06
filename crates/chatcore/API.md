@@ -19,7 +19,7 @@ every error is a `ChatError { code, message }`:
 
 | Function | Returns | Notes |
 |---|---|---|
-| `init(db_path, store_key?)` | `()` | Opens or creates the account's SQLite key database. With `store_key` (32 random bytes from the platform keystore) every value is sealed with AES-256-GCM, bound to its row and store; the database opens all or nothing and refuses plaintext, moved or tampered rows and the wrong key (`storage`). A plaintext database migrates once. |
+| `init(db_path, store_key, expect_existing)` | `()` | Opens the account's sealed SQLite key database (AES-256-GCM, each value bound to its row and store; all-or-nothing open). `expect_existing` = the keystore already held this key: a missing marker means the database was deleted or reset, and fails with `storage`. Otherwise only an empty database is initialized. No implicit migration, no fresh start; a failed open closes any previously open store. In an existing database a missing identity is a `storage` error; only `reset_identity` replaces it. |
 | `identity()` | `IdentityPub { dh, sign }` | Created on first call: separate X25519 and Ed25519 keys. |
 | `prepare_prekeys(now_ms)` | `PrekeyUpload { identity, rotated, signedPreKey }` | The signed prekey rotates weekly. When it rotates, claims under the retired one are pruned. |
 | `one_time_prekeys(count)` | `Vec<{ id, key }>` | Upload them when the server reports fewer than 20, as `account.js` `publishKeys` does. |

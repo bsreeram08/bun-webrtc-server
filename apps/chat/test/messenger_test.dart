@@ -208,6 +208,21 @@ void main() {
     });
   });
 
+  test('a locked key database never acknowledges or discards envelopes, however often they arrive', () async {
+    final envelope = await envelopeFrom(theirs, message('kept on the server'));
+    mine.lockDecrypt = true;
+    for (var i = 0; i < 5; i++) {
+      await deliver(envelope);
+    }
+    expect(acks, isEmpty, reason: 'never acked: the message is fine, our keys are not');
+    expect(messenger.keysLocked, isTrue);
+    expect(notices.where((n) => n.contains('discarded')), isEmpty);
+    posted.clear();
+    await messenger.send(alice, 'waits');
+    await messenger.flush();
+    expect(posted, isEmpty, reason: 'nothing is sent while the keys are locked');
+  });
+
   group('chat key rotation (account.js parity)', () {
     Map<String, Object?> rotateFrom(String reason) => {'v': 1, 'type': 'rotate', 'id': const Uuid().v4(), 'reason': reason};
     Map<String, Object?> policy(int ms) => {'v': 1, 'type': 'policy', 'id': const Uuid().v4(), 'rotateEveryMs': ms};

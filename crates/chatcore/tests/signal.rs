@@ -377,14 +377,14 @@ fn sas_codes_are_order_independent_and_fail_closed_on_ambiguous_fingerprints() {
 // ---------- Key database sealed at rest ----------
 #[test]
 fn a_sealed_key_database_reveals_no_secrets_and_needs_its_key() {
-    use chatcore::store::SqliteStore;
+    use chatcore::store::{Open, SqliteStore};
     let dir = std::env::temp_dir().join(format!("chatcore-sealed-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("keys.sqlite").to_string_lossy().to_string();
     let key = [7u8; 32];
     let private;
     {
-        let mut core = Core::new(Box::new(SqliteStore::open_with_key(&path, Some(key)).unwrap()));
+        let mut core = Core::new(Box::new(SqliteStore::open_sealed(&path, key, Open::Create).unwrap()));
         core.prekeys(NOW, None).unwrap();
         core.one_time_prekeys(3).unwrap();
         private = serde_json::to_string(&core.store_mut().get("identity").unwrap().unwrap()).unwrap();
@@ -394,23 +394,23 @@ fn a_sealed_key_database_reveals_no_secrets_and_needs_its_key() {
     let needle = &private[private.len() / 2..private.len() / 2 + 24];
     for bytes in [&raw, &wal] { assert!(!bytes.windows(needle.len()).any(|window| window == needle.as_bytes()), "identity found in plain text"); }
     // The right key reopens it; no key or another key is a storage error, never silently new keys.
-    let mut again = Core::new(Box::new(SqliteStore::open_with_key(&path, Some(key)).unwrap()));
+    let mut again = Core::new(Box::new(SqliteStore::open_sealed(&path, key, Open::Existing).unwrap()));
     assert_eq!(serde_json::to_string(&again.store_mut().get("identity").unwrap().unwrap()).unwrap(), private);
     assert_eq!(SqliteStore::open(&path).err().and_then(|error| error.code).as_deref(), Some("storage"));
-    assert_eq!(SqliteStore::open_with_key(&path, Some([8u8; 32])).err().and_then(|error| error.code).as_deref(), Some("storage"));
+    assert_eq!(SqliteStore::open_sealed(&path, [8u8; 32], Open::Existing).err().and_then(|error| error.code).as_deref(), Some("storage"));
     std::fs::remove_dir_all(&dir).ok();
 }
 
 /// Someone who can write the file (but has no store key) must not be able to plant or move state.
 #[test]
 fn a_sealed_key_database_fails_closed_on_tampering() {
-    use chatcore::store::SqliteStore;
+    use chatcore::store::{Open, SqliteStore};
     let dir = std::env::temp_dir().join(format!("chatcore-tamper-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let key = [9u8; 32];
     let fresh = |name: &str| {
         let path = dir.join(name).to_string_lossy().to_string();
-        let mut store = SqliteStore::open_with_key(&path, Some(key)).unwrap();
+        let mut store = SqliteStore::open_sealed(&path, key, Open::Create).unwrap();
         store.put("peer:alice", json!({ "identity": "alice-pin" })).unwrap();
         store.put("peer:bob", json!({ "identity": "bob-pin" })).unwrap();
         drop(store);
@@ -418,7 +418,7 @@ fn a_sealed_key_database_fails_closed_on_tampering() {
     };
     let row = |db: &rusqlite::Connection, key: &str| -> String { db.query_row("SELECT value FROM kv WHERE key = ?1", [key], |r| r.get(0)).unwrap() };
     // The whole database is refused at open: one bad row never yields a partially trusted store.
-    let refused = |path: &str| SqliteStore::open_with_key(path, Some(key)).err().and_then(|error| error.code);
+    let refused = |path: &str| SqliteStore::open_sealed(path, key, Open::Existing).err().and_then(|error| error.code);
 
     // 1. A tampered ciphertext.
     let (path, db) = fresh("tampered.sqlite");
@@ -453,12 +453,29 @@ fn a_sealed_key_database_fails_closed_on_tampering() {
     let (path, db) = fresh("unmarked.sqlite");
     db.execute("DELETE FROM kv WHERE key = '__sealed'", []).unwrap();
     db.execute("INSERT INTO kv (key, value) VALUES ('peer:mallory', '{\"identity\":\"attacker\"}')", []).unwrap();
-    assert_eq!(SqliteStore::open_with_key(&path, Some(key)).err().and_then(|error| error.code).as_deref(), Some("storage"));
+    assert_eq!(refused(&path).as_deref(), Some("storage"));
+    // ... and "create" never adopts it either: a database with any rows is not new.
+    assert_eq!(SqliteStore::open_sealed(&path, key, Open::Create).err().and_then(|error| error.code).as_deref(), Some("storage"));
 
-    // A plaintext store migrates once, then never accepts plaintext again.
+    // 6. The marker deleted and every row replaced with planted plaintext: never sealed as if it were ours.
+    let (path, db) = fresh("replanted.sqlite");
+    db.execute("DELETE FROM kv", []).unwrap();
+    db.execute("INSERT INTO kv (key, value) VALUES ('peer:alice', '{\"identity\":\"attacker\"}')", []).unwrap();
+    assert_eq!(refused(&path).as_deref(), Some("storage"));
+    assert_eq!(SqliteStore::open_sealed(&path, key, Open::Create).err().and_then(|error| error.code).as_deref(), Some("storage"));
+
+    // 7. The whole database deleted or emptied: an existing store is "missing or reset", never a fresh start.
+    let (path, db) = fresh("emptied.sqlite");
+    db.execute("DELETE FROM kv", []).unwrap();
+    assert_eq!(refused(&path).as_deref(), Some("storage"));
+    let gone = dir.join("deleted.sqlite").to_string_lossy().to_string();
+    assert_eq!(refused(&gone).as_deref(), Some("storage"));
+
+    // A plaintext store migrates once (explicitly), then never accepts plaintext again.
     let path = dir.join("legacy.sqlite").to_string_lossy().to_string();
     { let mut plain = SqliteStore::open(&path).unwrap(); plain.put("identity", json!({ "secret": "legacy" })).unwrap(); }
-    { let mut sealed = SqliteStore::open_with_key(&path, Some(key)).unwrap(); assert_eq!(sealed.get("identity").unwrap().unwrap()["secret"], "legacy"); }
+    { let mut sealed = SqliteStore::migrate_plaintext(&path, key).unwrap(); assert_eq!(sealed.get("identity").unwrap().unwrap()["secret"], "legacy"); }
+    assert!(SqliteStore::open_sealed(&path, key, Open::Existing).is_ok(), "the migrated store opens as existing");
     let raw: String = rusqlite::Connection::open(&path).unwrap().query_row("SELECT value FROM kv WHERE key = 'identity'", [], |r| r.get(0)).unwrap();
     assert!(raw.starts_with("enc1:") && !raw.contains("legacy"));
     // No pre-migration plaintext survives anywhere on disk: not in the file (freed pages), not in the WAL.
@@ -563,4 +580,27 @@ fn resetting_the_identity_drops_sessions_prekeys_and_pending_decrypts_but_keeps_
     assert!(sids(&mut alice, "bob").is_empty());
     assert_ne!(alice.core.identity().unwrap().public, old);
     assert!(alice.core.peer("bob").unwrap().is_some());
+}
+
+/// A missing identity row in an existing key database is never replaced silently; only reset_identity may.
+#[test]
+fn an_existing_key_database_never_mints_a_new_identity_on_its_own() {
+    use chatcore::store::{Open, SqliteStore};
+    let dir = std::env::temp_dir().join(format!("chatcore-identity-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("keys.sqlite").to_string_lossy().to_string();
+    let key = [5u8; 32];
+    let first = Core::new(Box::new(SqliteStore::open_sealed(&path, key, Open::Create).unwrap())).identity().unwrap().public;
+    {
+        // Someone deletes the identity row (the rest of the database still authenticates).
+        let mut store = SqliteStore::open_sealed(&path, key, Open::Existing).unwrap();
+        store.delete("identity").unwrap();
+    }
+    let mut core = Core::new(Box::new(SqliteStore::open_sealed(&path, key, Open::Existing).unwrap()));
+    assert_eq!(core.identity().unwrap_err().code.as_deref(), Some("storage"));
+    assert_eq!(core.prekeys(NOW, None).unwrap_err().code.as_deref(), Some("storage"));
+    // The explicit user action is the way out.
+    core.reset_identity().unwrap();
+    assert_ne!(core.identity().unwrap().public, first);
+    std::fs::remove_dir_all(&dir).ok();
 }

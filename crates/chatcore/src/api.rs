@@ -6,24 +6,28 @@ use crate::core::{Core, Decrypted, EncryptOutcome, PeerRecord, PrekeyUpload, Saf
 use crate::error::{ChatError, Result};
 use crate::protocol::{Bundle, IdentityPub, PublishedOneTimePreKey};
 use crate::sas;
-use crate::store::SqliteStore;
+use crate::store::{Open, SqliteStore};
 
 static CORE: Mutex<Option<Core>> = Mutex::new(None);
 
 fn with<T>(work: impl FnOnce(&mut Core) -> Result<T>) -> Result<T> {
     let mut guard = CORE.lock().map_err(|_| ChatError::transient("Core lock poisoned"))?;
-    let core = guard.as_mut().ok_or_else(|| ChatError::transient("Call init(db_path) first"))?;
+    // No open key database (never opened, or the last open failed): fail closed, never act on stale state.
+    let core = guard.as_mut().ok_or_else(|| ChatError::storage("key database is not open"))?;
     work(core)
 }
 
-/// Opens (or creates) the account's key database. Call once per signed-in account. `store_key` is 32 random
-/// bytes the app keeps in the platform keystore; every stored value is sealed with it (AES-256-GCM).
-pub fn init(db_path: String, store_key: Option<Vec<u8>>) -> Result<()> {
-    let key = store_key
-        .map(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| ChatError::coded("invalid", "store key must be 32 bytes")))
-        .transpose()?;
-    let core = Core::new(Box::new(SqliteStore::open_with_key(&db_path, key)?));
-    *CORE.lock().map_err(|_| ChatError::transient("Core lock poisoned"))? = Some(core);
+/// Opens the account's key database, sealed with `store_key` (32 bytes from the platform keystore).
+/// `expect_existing`: the app created this database before (its keystore holds a key for it), so a missing
+/// marker is a reset or replaced database and fails closed. Otherwise only an empty database is initialized.
+/// No key, no implicit migration, no silent fresh start: every failure is a `storage` error.
+pub fn init(db_path: String, store_key: Vec<u8>, expect_existing: bool) -> Result<()> {
+    let key = <[u8; 32]>::try_from(store_key.as_slice()).map_err(|_| ChatError::storage("store key must be 32 bytes"))?;
+    let mode = if expect_existing { Open::Existing } else { Open::Create };
+    let mut guard = CORE.lock().map_err(|_| ChatError::transient("Core lock poisoned"))?;
+    // Close whatever was open first: a failed open must never leave a previous account's store in use.
+    *guard = None;
+    *guard = Some(Core::new(Box::new(SqliteStore::open_sealed(&db_path, key, mode)?)));
     Ok(())
 }
 

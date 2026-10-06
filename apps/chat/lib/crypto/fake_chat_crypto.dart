@@ -22,8 +22,19 @@ class FakeChatCrypto implements ChatCrypto {
   final Set<String> committed = {};
   final Random _random = Random.secure();
 
+  /// Tests: make the next [init] fail as a locked key database.
+  bool locked = false;
+
   @override
-  Future<void> init(String dbPath) async {}
+  Future<void> init(String dbPath) async {
+    if (locked) throw const CryptoException('key database could not be unlocked', code: 'storage', keysLocked: true);
+  }
+
+  @override
+  Future<void> resetLocal(String dbPath) async {
+    locked = false;
+    me = Identity(dh: 'fake-dh-${_random.nextInt(1 << 31)}', sign: 'fake-sign');
+  }
 
   @override
   Future<Identity> identity() async => me;
@@ -52,8 +63,12 @@ class FakeChatCrypto implements ChatCrypto {
     return Encrypted(base64Url.encode(utf8.encode(jsonEncode({'fake': 1, 'from': me.toJson(), 'p': plaintextJson}))).replaceAll('=', ''));
   }
 
+  /// Tests: decryption fails as a locked key database (core `storage`).
+  bool lockDecrypt = false;
+
   @override
   Future<Decrypted> decryptFrom(String contactId, String envelope, {Identity? publishedIdentity}) async {
+    if (lockDecrypt) throw const CryptoException('key database could not be unlocked', code: 'storage', keysLocked: true);
     Map<String, dynamic> outer;
     try {
       outer = jsonDecode(utf8.decode(base64Url.decode(base64Url.normalize(envelope)))) as Map<String, dynamic>;

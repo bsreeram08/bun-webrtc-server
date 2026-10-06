@@ -127,6 +127,7 @@ class AppState {
     this.call,
     this.keyChanged = const {},
     this.inactiveDevice = false,
+    this.keysLocked = false,
   });
   final AuthPhase phase;
   final User? user;
@@ -142,6 +143,9 @@ class AppState {
   /// Encrypted messaging for this account is active on another device or browser.
   final bool inactiveDevice;
 
+  /// This device's key database can't be unlocked: messaging is stopped until the user recovers.
+  final bool keysLocked;
+
   AppState copyWith({
     AuthPhase? phase,
     User? user,
@@ -155,6 +159,7 @@ class AppState {
     bool clearCall = false,
     Set<String>? keyChanged,
     bool? inactiveDevice,
+    bool? keysLocked,
   }) => AppState(
     phase: phase ?? this.phase,
     user: user ?? this.user,
@@ -165,6 +170,7 @@ class AppState {
     call: clearCall ? null : call ?? this.call,
     keyChanged: keyChanged ?? this.keyChanged,
     inactiveDevice: inactiveDevice ?? this.inactiveDevice,
+    keysLocked: keysLocked ?? this.keysLocked,
   );
 }
 
@@ -222,7 +228,15 @@ class AppController extends Notifier<AppState> {
     await ref.read(themePrefsProvider.notifier).load(user.id);
     final dbStore = await ref.read(storeOpenerProvider)(user.id);
     store = dbStore;
-    await _crypto.init('keys-${user.id}');
+    try {
+      await _crypto.init('keys-${user.id}');
+    } on CryptoException catch (error) {
+      if (!error.keysLocked) rethrow;
+      // Signed in, but encrypted messaging stays off until the user chooses recovery. Never reset silently.
+      state = state.copyWith(phase: AuthPhase.signedIn, user: user, keysLocked: true, clearNotice: true);
+      await loadContacts();
+      return;
+    }
     final events = EventsClient(url: _api.base.replace(scheme: _api.base.scheme == 'https' ? 'wss' : 'ws', path: '/api/events'), token: token);
     _events = events;
     final m = Messenger(
@@ -242,7 +256,8 @@ class AppController extends Notifier<AppState> {
       ..add(m.notices.listen((text) => state = state.copyWith(notice: text)))
       ..add(m.unreadChanges.listen((unread) => state = state.copyWith(unread: unread)))
       ..add(m.identityChanges.listen((id) => state = state.copyWith(keyChanged: {...state.keyChanged, id})))
-      ..add(m.activeChanges.listen((active) => state = state.copyWith(inactiveDevice: !active)));
+      ..add(m.activeChanges.listen((active) => state = state.copyWith(inactiveDevice: !active)))
+      ..add(m.lockedChanges.listen((locked) => state = state.copyWith(keysLocked: locked)));
     state = state.copyWith(phase: AuthPhase.signedIn, user: user, clearNotice: true);
     unawaited(_checkActive());
     await loadContacts();
@@ -315,6 +330,19 @@ class AppController extends Notifier<AppState> {
   Future<void> regenerateIdentity() async {
     await messenger?.regenerateIdentity();
     state = state.copyWith(inactiveDevice: false);
+  }
+
+  /// Recovery, only from the user's confirmed tap: delete this device's unusable key database and start a
+  /// new identity here (contacts see a security-code change). Message history on this device stays.
+  Future<void> recoverKeys() async {
+    final user = state.user;
+    final token = _api.token;
+    if (user == null || token == null) return;
+    await _crypto.resetLocal('keys-${user.id}');
+    await _teardown();
+    state = state.copyWith(keysLocked: false);
+    await _signedIn(user, token);
+    await messenger?.takeOver();
   }
 
   /// "Use this device instead": only ever from the user's tap.

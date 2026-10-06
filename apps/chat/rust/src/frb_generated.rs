@@ -315,10 +315,12 @@ fn wire__crate__api__init_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_db_path = <String>::sse_decode(&mut deserializer);
             let api_store_key = <Vec<u8>>::sse_decode(&mut deserializer);
+            let api_expect_existing = <bool>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, crate::api::CoreError>((move || {
-                    let output_ok = crate::api::init(api_db_path, api_store_key)?;
+                    let output_ok =
+                        crate::api::init(api_db_path, api_store_key, api_expect_existing)?;
                     std::result::Result::Ok(output_ok)
                 })())
             }

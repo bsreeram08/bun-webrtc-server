@@ -107,6 +107,7 @@ abstract class RustLibApi extends BaseApi {
   Future<void> crateApiInit({
     required String dbPath,
     required List<int> storeKey,
+    required bool expectExisting,
   });
 
   Future<void> crateApiNotePeer({
@@ -386,6 +387,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Future<void> crateApiInit({
     required String dbPath,
     required List<int> storeKey,
+    required bool expectExisting,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -393,6 +395,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(dbPath, serializer);
           sse_encode_list_prim_u_8_loose(storeKey, serializer);
+          sse_encode_bool(expectExisting, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -405,14 +408,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_core_error,
         ),
         constMeta: kCrateApiInitConstMeta,
-        argValues: [dbPath, storeKey],
+        argValues: [dbPath, storeKey, expectExisting],
         apiImpl: this,
       ),
     );
   }
 
-  TaskConstMeta get kCrateApiInitConstMeta =>
-      const TaskConstMeta(debugName: "init", argNames: ["dbPath", "storeKey"]);
+  TaskConstMeta get kCrateApiInitConstMeta => const TaskConstMeta(
+    debugName: "init",
+    argNames: ["dbPath", "storeKey", "expectExisting"],
+  );
 
   @override
   Future<void> crateApiNotePeer({

@@ -147,10 +147,12 @@ class _PrivateChatAppState extends ConsumerState<PrivateChatApp> {
       builder: (context, child) {
         final ring = ref.watch(appProvider.select((s) => s.incoming));
         final inactive = ref.watch(appProvider.select((s) => s.inactiveDevice));
+        final locked = ref.watch(appProvider.select((s) => s.keysLocked));
         return Stack(
           children: [
             child ?? const SizedBox.shrink(),
-            if (inactive) const Positioned(left: 0, right: 0, bottom: 0, child: InactiveDeviceBanner()),
+            if (inactive && !locked) const Positioned(left: 0, right: 0, bottom: 0, child: InactiveDeviceBanner()),
+            if (locked) const Positioned(left: 0, right: 0, bottom: 0, child: KeysLockedBanner()),
             if (_updateRequired)
               const Positioned(
                 left: 0,
@@ -205,6 +207,53 @@ class InactiveDeviceBanner extends ConsumerWidget {
               onPressed: () => ref.read(appProvider.notifier).useThisDevice(),
               child: const Text('Use this device instead'),
             ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+/// This device's key database can't be unlocked (store key missing, database reset or tampered). Messaging
+/// stays off; nothing is reset until the user explicitly chooses to start over on this device.
+class KeysLockedBanner extends ConsumerWidget {
+  const KeysLockedBanner({super.key});
+  Future<void> _recover(BuildContext context, WidgetRef ref) async {
+    final yes = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Start encrypted messaging over on this device?'),
+        content: const Text(
+          "This device's encryption keys can't be unlocked, so it can't read new messages. Starting over creates "
+          'new keys here. Your contacts will see that your security code changed, and messages sent to the old '
+          'keys can\'t be recovered. Message history already on this device stays.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Not now')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Start over')),
+        ],
+      ),
+    );
+    if (yes == true) await ref.read(appProvider.notifier).recoverKeys();
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) => Material(
+    color: const Color(0xFF3D1A1A),
+    child: SafeArea(
+      top: false,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
+        child: Row(
+          children: [
+            const Expanded(
+              child: Text(
+                "This device's encryption keys can't be unlocked. Messaging is paused; nothing has been reset.",
+                style: TextStyle(color: Color(0xFFF28B82)),
+              ),
+            ),
+            const SizedBox(width: 8),
+            FilledButton(key: const Key('recover-keys'), onPressed: () => _recover(context, ref), child: const Text('Recover')),
           ],
         ),
       ),

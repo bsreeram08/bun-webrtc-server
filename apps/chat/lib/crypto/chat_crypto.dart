@@ -93,9 +93,13 @@ class Decrypted {
 /// `unknown-spk`, `claim-limit`, `storage`, ...) so [inboundDisposition]
 /// classifies it identically. An uncoded error is retried, never discarded.
 class CryptoException implements Exception {
-  const CryptoException(this.message, {this.code});
+  const CryptoException(this.message, {this.code, this.keysLocked = false});
   final String message;
   final String? code;
+
+  /// The key database itself can't be used (missing store key, tampered or reset database). Never
+  /// acknowledge envelopes or create keys because of it: stop and show the recovery screen.
+  final bool keysLocked;
   @override
   String toString() => message;
 }
@@ -145,8 +149,13 @@ int rotationInterval(int mine, int theirs) {
 }
 
 abstract class ChatCrypto {
-  /// Opens (or creates) the key store for the signed-in account.
+  /// Opens the key store for the signed-in account. Throws [CryptoException] with
+  /// `keysLocked` when it exists but can't be unlocked; never starts over silently.
   Future<void> init(String dbPath);
+
+  /// Recovery only, after the user confirms: deletes this account's key store and its store key, so the
+  /// next [init] starts a new identity. Contacts will see a security-code change.
+  Future<void> resetLocal(String dbPath);
 
   Future<Identity> identity();
 

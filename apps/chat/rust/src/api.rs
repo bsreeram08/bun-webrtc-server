@@ -48,7 +48,8 @@ pub struct SessionInfo {
 }
 
 /// Opens the account's key database, sealed with `store_key` (32 bytes from the platform keystore).
-pub fn init(db_path: String, store_key: Vec<u8>) -> Result<()> { Ok(core::init(db_path, Some(store_key))?) }
+/// `expect_existing`: the keystore already held this key, so the database must exist (fails closed otherwise).
+pub fn init(db_path: String, store_key: Vec<u8>, expect_existing: bool) -> Result<()> { Ok(core::init(db_path, store_key, expect_existing)?) }
 
 pub fn identity() -> Result<Identity> { Ok(core::identity()?.into()) }
 

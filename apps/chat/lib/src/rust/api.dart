@@ -10,8 +10,16 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `fmt`, `from`, `from`, `from`
 
 /// Opens the account's key database, sealed with `store_key` (32 bytes from the platform keystore).
-Future<void> init({required String dbPath, required List<int> storeKey}) =>
-    RustLib.instance.api.crateApiInit(dbPath: dbPath, storeKey: storeKey);
+/// `expect_existing`: the keystore already held this key, so the database must exist (fails closed otherwise).
+Future<void> init({
+  required String dbPath,
+  required List<int> storeKey,
+  required bool expectExisting,
+}) => RustLib.instance.api.crateApiInit(
+  dbPath: dbPath,
+  storeKey: storeKey,
+  expectExisting: expectExisting,
+);
 
 Future<Identity> identity() => RustLib.instance.api.crateApiIdentity();
 

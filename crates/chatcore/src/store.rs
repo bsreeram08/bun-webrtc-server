@@ -25,6 +25,9 @@ pub trait Store: Send {
     fn delete_prefix(&mut self, prefix: &str) -> Result<()>;
     /// All writes apply atomically or not at all.
     fn batch(&mut self, writes: Vec<Write>) -> Result<()>;
+    /// Whether a missing identity may be created on first use. False for a key database that existed
+    /// before: there, a missing identity means it was deleted, and only an explicit reset may replace it.
+    fn allows_new_identity(&self) -> bool { true }
 }
 
 /// SQLite store: one `kv` table, every batch in one transaction.
@@ -35,14 +38,19 @@ pub trait Store: Send {
 /// or moved to another row or another store. A sealed store fails closed: a plaintext row, a ciphertext from
 /// another row, a missing or altered marker, or the wrong key is a `storage` error, never silently new keys.
 ///
-/// Opening a plaintext store with a key migrates it once: every row is sealed and an authenticated marker
-/// (holding the random store id) is written in one transaction. From then on plaintext is never accepted.
+/// Opening is explicit about what the caller expects ([`Open`]): an `Existing` database must carry an
+/// authenticated marker (a missing, deleted or reset database is a `storage` error, never a fresh start);
+/// `Create` only initializes a database with no rows at all. Nothing is ever migrated implicitly: an
+/// attacker who deletes the marker and plants plaintext rows can't get them sealed as if they were ours.
+/// [`SqliteStore::migrate_plaintext`] is the one explicit, one-time migration (rows sealed and the marker
+/// written in one transaction, then plaintext purged).
 /// The store key stays in memory (zeroized on drop) for the life of the store, because every write seals.
 /// Not covered: rolling a row back to an older sealed value of the *same* row (anyone able to write the file
 /// can also delete it); the app sandbox and the keystore are the boundary for that.
 pub struct SqliteStore {
     connection: Connection,
     sealing: Option<Sealing>,
+    fresh: bool,
 }
 
 struct Sealing {
@@ -68,32 +76,65 @@ fn unseal_with(key: &[u8; 32], aad: &str, text: &str) -> Result<Zeroizing<Vec<u8
 }
 const MARKER_AAD: &str = "enc1|marker|__sealed";
 
+/// What the caller expects to find when opening a sealed key database.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Open {
+    /// A database created earlier with this key: its authenticated marker must be present.
+    Existing,
+    /// A brand-new database: it must contain no rows; the marker is written now.
+    Create,
+}
+
+fn connect(path: &str) -> Result<Connection> {
+    let connection = Connection::open(path).map_err(ChatError::storage)?;
+    connection
+        // secure_delete: freed pages are zeroed, so replaced or deleted secrets don't linger in the file.
+        .execute_batch("PRAGMA secure_delete = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+        .map_err(ChatError::storage)?;
+    Ok(connection)
+}
+fn marker_of(connection: &Connection) -> Result<Option<String>> {
+    connection.query_row("SELECT value FROM kv WHERE key = ?1", params![MARKER], |row| row.get(0)).optional().map_err(ChatError::storage)
+}
+fn row_count(connection: &Connection) -> Result<i64> {
+    connection.query_row("SELECT COUNT(*) FROM kv", [], |row| row.get(0)).map_err(ChatError::storage)
+}
+fn write_marker(connection: &mut Connection, key: &[u8; 32], plaintext_rows: Vec<(String, Zeroizing<String>)>) -> Result<String> {
+    let store_id = URL_SAFE_NO_PAD.encode(crate::primitives::random_bytes::<16>());
+    let tx = connection.transaction().map_err(ChatError::storage)?;
+    for (row, text) in plaintext_rows {
+        serde_json::from_str::<Value>(&text).map_err(ChatError::storage)?;
+        tx.execute("UPDATE kv SET value = ?1 WHERE key = ?2", params![seal_with(key, &format!("enc1|{store_id}|{row}"), &text)?, row]).map_err(ChatError::storage)?;
+    }
+    let marker = serde_json::json!({ "v": 1, "store": store_id }).to_string();
+    tx.execute("INSERT INTO kv (key, value) VALUES (?1, ?2)", params![MARKER, seal_with(key, MARKER_AAD, &marker)?]).map_err(ChatError::storage)?;
+    tx.commit().map_err(ChatError::storage)?;
+    Ok(store_id)
+}
+
 impl SqliteStore {
-    pub fn open(path: &str) -> Result<Self> { Self::open_with_key(path, None) }
-    pub fn open_with_key(path: &str, key: Option<[u8; 32]>) -> Result<Self> {
-        let mut connection = Connection::open(path).map_err(ChatError::storage)?;
-        connection
-            // secure_delete: freed pages are zeroed, so replaced or deleted secrets don't linger in the file.
-            .execute_batch("PRAGMA secure_delete = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
-            .map_err(ChatError::storage)?;
-        let marker: Option<String> = connection.query_row("SELECT value FROM kv WHERE key = ?1", params![MARKER], |row| row.get(0)).optional().map_err(ChatError::storage)?;
+    /// An unsealed store (tests and tools only; the apps always open sealed). Refuses a sealed database.
+    pub fn open(path: &str) -> Result<Self> {
+        let connection = connect(path)?;
         let any_sealed: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM kv WHERE value LIKE 'enc1:%')", [], |row| row.get(0)).map_err(ChatError::storage)?;
-        let Some(key) = key else {
-            // No key: only a store that was never sealed opens, in plaintext mode.
-            if marker.is_some() || any_sealed { return Err(ChatError::storage("key database is locked: store key missing")); }
-            return Ok(Self { connection, sealing: None });
-        };
+        if marker_of(&connection)?.is_some() || any_sealed { return Err(ChatError::storage("key database is locked: store key missing")); }
+        Ok(Self { connection, sealing: None, fresh: true })
+    }
+
+    /// Opens a sealed key database. All or nothing: the marker and every row must authenticate under this
+    /// key before the store is used, so one planted, moved or corrupted row refuses the whole database.
+    pub fn open_sealed(path: &str, key: [u8; 32], mode: Open) -> Result<Self> {
+        let mut connection = connect(path)?;
         let key = Zeroizing::new(key);
-        let store_id = match marker {
-            Some(text) => {
+        let fresh = mode == Open::Create && marker_of(&connection)?.is_none();
+        let store_id = match (marker_of(&connection)?, mode) {
+            (Some(text), _) => {
                 let plain = unseal_with(&key, MARKER_AAD, &text)?;
                 let value: Value = serde_json::from_slice(&plain).map_err(ChatError::storage)?;
                 let store_id = match (value.get("v").and_then(Value::as_u64), value.get("store").and_then(Value::as_str)) {
                     (Some(1), Some(id)) if id.len() == 22 => id.to_string(),
                     _ => return Err(ChatError::storage("invalid key database marker")),
                 };
-                // All or nothing: every row must authenticate before the store is used at all, so a single
-                // planted, moved or corrupted row refuses the whole database instead of surfacing later.
                 let rows: Vec<(String, String)> = {
                     let mut statement = connection.prepare("SELECT key, value FROM kv WHERE key <> ?1").map_err(ChatError::storage)?;
                     let rows = statement.query_map(params![MARKER], |row| Ok((row.get(0)?, row.get(1)?))).map_err(ChatError::storage)?;
@@ -105,31 +146,31 @@ impl SqliteStore {
                 }
                 store_id
             }
-            None => {
-                // Sealed rows without a marker mean the marker was removed: fail closed, never re-migrate.
-                if any_sealed { return Err(ChatError::storage("key database marker missing")); }
-                let store_id = URL_SAFE_NO_PAD.encode(crate::primitives::random_bytes::<16>());
-                let rows: Vec<(String, Zeroizing<String>)> = {
-                    let mut statement = connection.prepare("SELECT key, value FROM kv").map_err(ChatError::storage)?;
-                    let rows = statement.query_map([], |row| Ok((row.get(0)?, Zeroizing::new(row.get::<_, String>(1)?)))).map_err(ChatError::storage)?;
-                    rows.collect::<std::result::Result<_, _>>().map_err(ChatError::storage)?
-                };
-                // One-time migration: seal every plaintext row and write the marker in one transaction.
-                let tx = connection.transaction().map_err(ChatError::storage)?;
-                for (row, text) in rows {
-                    serde_json::from_str::<Value>(&text).map_err(ChatError::storage)?;
-                    tx.execute("UPDATE kv SET value = ?1 WHERE key = ?2", params![seal_with(&key, &format!("enc1|{store_id}|{row}"), &text)?, row]).map_err(ChatError::storage)?;
-                }
-                let marker = serde_json::json!({ "v": 1, "store": store_id }).to_string();
-                tx.execute("INSERT INTO kv (key, value) VALUES (?1, ?2)", params![MARKER, seal_with(&key, MARKER_AAD, &marker)?]).map_err(ChatError::storage)?;
-                tx.commit().map_err(ChatError::storage)?;
-                // Purge the plaintext copies: fold the WAL into the file, rebuild it (secure_delete zeroes freed
-                // pages) and truncate the WAL again, so no pre-migration secret survives on disk.
-                connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA wal_checkpoint(TRUNCATE);").map_err(ChatError::storage)?;
-                store_id
+            // Expected an existing database: a missing marker means it was deleted, reset or replaced.
+            (None, Open::Existing) => return Err(ChatError::storage("key database missing or reset")),
+            (None, Open::Create) => {
+                if row_count(&connection)? != 0 { return Err(ChatError::storage("unexpected data in a new key database")); }
+                write_marker(&mut connection, &key, Vec::new())?
             }
         };
-        Ok(Self { connection, sealing: Some(Sealing { key, store_id }) })
+        Ok(Self { connection, sealing: Some(Sealing { key, store_id }), fresh })
+    }
+
+    /// The one explicit migration of an unsealed database (never reached by opening): seals every row and writes
+    /// the marker in one transaction, then purges plaintext (WAL checkpoint, VACUUM under secure_delete).
+    pub fn migrate_plaintext(path: &str, key: [u8; 32]) -> Result<Self> {
+        let mut connection = connect(path)?;
+        let any_sealed: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM kv WHERE value LIKE 'enc1:%')", [], |row| row.get(0)).map_err(ChatError::storage)?;
+        if marker_of(&connection)?.is_some() || any_sealed { return Err(ChatError::storage("key database is already sealed")); }
+        let rows: Vec<(String, Zeroizing<String>)> = {
+            let mut statement = connection.prepare("SELECT key, value FROM kv").map_err(ChatError::storage)?;
+            let rows = statement.query_map([], |row| Ok((row.get(0)?, Zeroizing::new(row.get::<_, String>(1)?)))).map_err(ChatError::storage)?;
+            rows.collect::<std::result::Result<_, _>>().map_err(ChatError::storage)?
+        };
+        write_marker(&mut connection, &key, rows)?;
+        connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA wal_checkpoint(TRUNCATE);").map_err(ChatError::storage)?;
+        drop(connection);
+        Self::open_sealed(path, key, Open::Existing)
     }
     pub fn memory() -> Result<Self> { Self::open(":memory:") }
 
@@ -150,6 +191,7 @@ impl SqliteStore {
 }
 
 impl Store for SqliteStore {
+    fn allows_new_identity(&self) -> bool { self.fresh }
     fn get(&mut self, key: &str) -> Result<Option<Value>> {
         if key == MARKER { return Err(ChatError::storage("reserved key")); }
         let text: Option<String> = self

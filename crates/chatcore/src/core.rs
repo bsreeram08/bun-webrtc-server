@@ -112,6 +112,8 @@ struct Pending {
 
 pub struct Core {
     store: Box<dyn Store>,
+    /// A missing identity may be generated only in a brand-new store or after an explicit `reset_identity`.
+    may_create_identity: bool,
     pending: BTreeMap<String, Pending>,
     pending_order: VecDeque<String>,
     next_pending: u64,
@@ -145,7 +147,8 @@ fn only(record: SessionRecord, sid: &str) -> SessionRecord {
 
 impl Core {
     pub fn new(store: Box<dyn Store>) -> Self {
-        Self { store, pending: BTreeMap::new(), pending_order: VecDeque::new(), next_pending: 1 }
+        let may_create_identity = store.allows_new_identity();
+        Self { store, may_create_identity, pending: BTreeMap::new(), pending_order: VecDeque::new(), next_pending: 1 }
     }
 
     fn get<T: for<'de> Deserialize<'de>>(&mut self, key: &str) -> Result<Option<T>> {
@@ -154,8 +157,11 @@ impl Core {
 
     pub fn identity(&mut self) -> Result<Identity> {
         if let Some(identity) = self.get::<Identity>("identity")? { return Ok(identity); }
+        // Never mint a new identity because one went missing from an existing key database.
+        if !self.may_create_identity { return Err(ChatError::storage("identity missing from the key database")); }
         let identity = generate_identity();
         self.store.put("identity", to_value(&identity))?;
+        self.may_create_identity = false;
         Ok(identity)
     }
 
@@ -406,7 +412,9 @@ impl Core {
         self.pending.clear();
         self.pending_order.clear();
         for prefix in ["sessions:", "opk:", "claim:", "claims:"] { self.store.delete_prefix(prefix)?; }
-        self.store.batch(vec![Write::Delete("identity".into()), Write::Delete("spk".into()), Write::Delete("opk-next".into())])
+        self.store.batch(vec![Write::Delete("identity".into()), Write::Delete("spk".into()), Write::Delete("opk-next".into())])?;
+        self.may_create_identity = true; // The explicit user action is the only other way to a new identity.
+        Ok(())
     }
 
     #[doc(hidden)]

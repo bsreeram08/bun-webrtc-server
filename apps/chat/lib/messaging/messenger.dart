@@ -93,6 +93,12 @@ class Messenger {
   /// uploads keys, sends envelopes, and processes or acknowledges incoming envelopes:
   /// they belong to the active device, and acknowledging them here would delete them.
   bool active = false;
+
+  /// The key database refused to work mid-session (tampered, reset, identity missing): stop processing and
+  /// acknowledging until the user recovers. Envelopes stay on the server.
+  bool keysLocked = false;
+  final _lockedChanges = StreamController<bool>.broadcast();
+  Stream<bool> get lockedChanges => _lockedChanges.stream;
   final _activeChanges = StreamController<bool>.broadcast();
   Stream<bool> get activeChanges => _activeChanges.stream;
 
@@ -134,8 +140,8 @@ class Messenger {
   Future<void> receive(EnvelopeEvent event) => _inbound = _inbound.then((_) => _receive(event)).catchError((_) {});
 
   Future<void> _receive(EnvelopeEvent event) async {
-    // Inactive: neither process nor acknowledge; the active device will.
-    if (!active) return;
+    // Inactive: neither process nor acknowledge; the active device will. Locked keys: neither, until recovery.
+    if (!active || keysLocked) return;
     final conversationId = conversationWith(event.fromId);
     String? failureCode;
     var failed = false;
@@ -180,6 +186,12 @@ class Messenger {
       }
       await crypto.commit(decrypted.commitId, rotate: rotated);
     } on CryptoException catch (error) {
+      if (error.keysLocked) {
+        // Never count or acknowledge this: the message is fine, our key database isn't.
+        keysLocked = true;
+        _lockedChanges.add(true);
+        return;
+      }
       failed = true;
       failureCode = error.code;
     } on StoreException catch (error) {
@@ -275,7 +287,7 @@ class Messenger {
 
   /// Sends every queued message, oldest first, keeping each contact's order.
   Future<void> flush() async {
-    if (!active || _disposed) return; // Messages stay queued here until this device is made active.
+    if (!active || keysLocked || _disposed) return; // Messages stay queued here until this device is usable.
     if (_flushing) {
       _flushAgain = true;
       return;
@@ -407,5 +419,6 @@ class Messenger {
     await _unread.close();
     await _identity.close();
     await _activeChanges.close();
+    await _lockedChanges.close();
   }
 }
