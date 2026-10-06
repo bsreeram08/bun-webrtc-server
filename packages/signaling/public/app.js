@@ -41,7 +41,8 @@ function openInvitation(value) {
 }
 function updateComposer() {
   const canCompose = (validInvite || accountChat) && selectedHistory === conversationId && Boolean(window.ChatStore);
-  $('chat-input').disabled = !canCompose || chatBusy;
+  // Never disable the text box while a send is in flight: that drops keyboard focus mid-conversation.
+  $('chat-input').disabled = !canCompose;
   $('chat-send').disabled = !canCompose || chatBusy;
   $('burn').disabled = $('conv-burn').disabled = !(validInvite || accountChat) || chatBusy;
 }
@@ -523,16 +524,20 @@ $('chat-form').addEventListener('submit', async event => {
   const text = $('chat-input').value;
   if (!text.trim() || encoder.encode(text).length > 4096) { chatStatus('Enter a message up to 4096 UTF-8 bytes.'); return; }
   chatBusy = true; updateComposer();
+  // Clear at once so typing can continue; restore the text only if saving fails and nothing new was typed.
+  $('chat-input').value = ''; resizeComposer(); $('chat-input').focus?.();
   const createdAt = Date.now(), duration = Number($('disappear').value) || 0;
   try {
     await window.ChatStore.put({ id: crypto.randomUUID(), conversationId, direction: 'outgoing', text, createdAt, status: 'queued', expiresAt: duration ? createdAt + duration : null });
-    $('chat-input').value = ''; resizeComposer();
     if (accountChat) window.App?.onQueued?.(); // Encrypted and posted to the mailbox by account.js.
     else if (requestChatFlush?.(), dataChannel?.readyState === 'open') chatStatus('');
     else chatStatus('Queued on this device. Both participants need a valid invitation and a connection to exchange it.');
     await refreshHistory();
-  } catch (error) { chatStatus(error.message || 'Could not save this message.'); }
-  finally { chatBusy = false; updateComposer(); }
+  } catch (error) {
+    chatStatus(error.message || 'Could not save this message.');
+    if (!$('chat-input').value) { $('chat-input').value = text; resizeComposer(); }
+  }
+  finally { chatBusy = false; updateComposer(); $('chat-input').focus?.(); }
 });
 // Single-row composer that grows with its text; Enter sends on devices with a keyboard.
 function resizeComposer() { const input = $('chat-input'); if (!input.style) return; input.style.height = 'auto'; input.style.height = `${Math.min(input.scrollHeight, 160)}px`; }
@@ -591,7 +596,8 @@ window.App = {
     if (active && conversationId !== next.conversationId) throw new Error('busy');
     conversationId = selectedHistory = next.conversationId; peerName = next.peerName; accountChat = true; transcriptSignature = '';
     if (!active) { validInvite = false; chatStatus(''); }
-    refreshHistory();
+    // With a keyboard, opening a chat puts the cursor in the message box (phones keep their keyboard closed).
+    refreshHistory().then(() => { if (window.matchMedia?.('(pointer: fine)')?.matches) $('chat-input').focus?.(); });
   },
   closeConversation() { if (!active) { accountChat = false; conversationId = null; selectedHistory = ''; refreshHistory(); } },
   async start(next) {
