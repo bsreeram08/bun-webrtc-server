@@ -44,6 +44,11 @@ export function fcmMessage(token: string, payload: NativePayload) {
 /** APNs request: VoIP pushes wake CallKit; token checks are silent background pushes; everything else is an alert. */
 export function apnsRequest(platform: 'apns' | 'apns-voip', payload: NativePayload, bundleId: string, nowSeconds: number) {
     const voip = platform === 'apns-voip';
+    // A VoIP verify push must still be reported to CallKit by the app (iOS rule); it ends that call at once.
+    if (payload.type === 'verify' && voip) return {
+        headers: { 'apns-topic': `${bundleId}.voip`, 'apns-push-type': 'voip', 'apns-priority': '10', 'apns-expiration': String(nowSeconds + 120) } as Record<string, string>,
+        body: { ...fields(payload), aps: {} } as Record<string, unknown>,
+    };
     if (payload.type === 'verify') return {
         headers: { 'apns-topic': bundleId, 'apns-push-type': 'background', 'apns-priority': '5', 'apns-expiration': String(nowSeconds + 120) } as Record<string, string>,
         body: { ...fields(payload), aps: { 'content-available': 1 } } as Record<string, unknown>,

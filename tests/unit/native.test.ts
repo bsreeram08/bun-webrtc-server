@@ -284,25 +284,24 @@ describe('native push', () => {
         expect((await register(alice.bearer, 'apns', apnsToken)).status).toBe(400);
         expect(app.accounts!.testing.db.query('SELECT COUNT(*) AS count FROM push_native_pending').get()).toEqual({ count: 0 });
     });
-    test('VoIP tokens bind only beside a confirmed APNs token of the same install; a contested binding is held briefly, never forever', async () => {
+    test('VoIP tokens bind only beside a confirmed APNs token of the same install; a held token moves only with a VoIP nonce', async () => {
         const alice = user('alice'), mallory = user('mallory');
         expect((await register(alice.bearer, 'apns-voip', voipToken)).status).toBe(409);
         await bind(alice.bearer, 'apns', apnsToken);
         expect((await register(alice.bearer, 'apns-voip', voipToken, otherInstall)).status).toBe(409);
-        expect((await register(alice.bearer, 'apns-voip', voipToken)).status).toBe(201);
-        expect(sent.some(item => item.platform === 'apns-voip')).toBe(false); // No nonce push over VoIP.
+        expect((await register(alice.bearer, 'apns-voip', voipToken)).status).toBe(201); // Unclaimed: binds directly.
+        expect(sent.some(item => item.platform === 'apns-voip')).toBe(false);
+        // Mallory claims the held token: only a VoIP nonce push goes out, and the binding stays with alice.
         await bind(mallory.bearer, 'apns', 'ef'.repeat(32), otherInstall);
-        expect((await register(mallory.bearer, 'apns-voip', voipToken, otherInstall)).status).toBe(409);
+        expect((await register(mallory.bearer, 'apns-voip', voipToken, otherInstall)).status).toBe(202);
+        expect(sent.filter(item => item.platform === 'apns-voip').map(item => item.payload.type)).toEqual(['verify']);
+        expect((await confirm(mallory.bearer, 'apns-voip', voipToken, 'guess')).status).toBe(400);
         expect(owner('apns-voip', voipToken)).toBe(alice.id);
-        expect((await confirm(alice.bearer, 'apns-voip', voipToken, 'x')).status).toBe(400);
-        // A squatter cannot keep a device's VoIP token: once the hold lapses, the real install reclaims it.
-        app.accounts!.testing.db.query("UPDATE push_native SET created_at = 0 WHERE platform = 'apns-voip'").run();
-        expect((await register(mallory.bearer, 'apns-voip', voipToken, otherInstall)).status).toBe(201);
-        expect((await register(alice.bearer, 'apns-voip', voipToken)).status).toBe(409);
-        app.accounts!.testing.db.query("UPDATE push_native SET created_at = 0 WHERE platform = 'apns-voip'").run();
+        // The device that really holds the token (it received the nonce) can always move it back.
         await Bun.sleep(1000); // Fresh rate-limit window.
-        expect((await register(alice.bearer, 'apns-voip', voipToken)).status).toBe(201);
-        expect(owner('apns-voip', voipToken)).toBe(alice.id);
+        expect((await register(mallory.bearer, 'apns-voip', voipToken, otherInstall)).status).toBe(202);
+        expect((await confirm(mallory.bearer, 'apns-voip', voipToken, nonceFor(voipToken))).status).toBe(201);
+        expect(owner('apns-voip', voipToken)).toBe(mallory.id);
     });
     test('messages reach FCM and APNs alerts; calls use VoIP instead of an alert on that device; no text ever', async () => {
         const alice = user('alice'), bob = user('bob');

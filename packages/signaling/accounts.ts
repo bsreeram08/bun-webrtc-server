@@ -352,7 +352,6 @@ export function createAccounts(options: { db: Database; origin: string; now: () 
                 invalid: () => json({ error: 'Unsupported device token.' }, 400),
                 unconfigured: () => json({ error: 'That notification service is not configured.' }, 404),
                 busy: () => json({ error: 'Too many unconfirmed device tokens. Try again in two minutes.' }, 429),
-                conflict: () => json({ error: 'That VoIP token belongs to another session.' }, 409),
                 unconfirmed: () => json({ error: 'Confirm this install\'s APNs token before its VoIP token.' }, 409),
             }[outcome]();
         }

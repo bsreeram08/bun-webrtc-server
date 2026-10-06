@@ -18,10 +18,9 @@ const HOSTS = ['fcm.googleapis.com', 'updates.push.services.mozilla.com'];
 const SUFFIXES = ['.push.apple.com', '.notify.windows.com'];
 const B64URL = /^[A-Za-z0-9_-]+$/;
 const MAX_PER_USER = 10, MAX_NATIVE_PER_USER = 20, MAX_PENDING_PER_USER = 5, PENDING_LIFETIME = 120000;
-const VOIP_HOLD = 10 * 60000; // A contested VoIP binding can change hands at most this often.
 const INSTALL_ID = /^[A-Za-z0-9_-]{16,64}$/;
 const digest = (value: string) => createHash('sha256').update(value).digest();
-export type NativeRegistration = 'registered' | 'pending' | 'invalid' | 'unconfigured' | 'busy' | 'conflict' | 'unconfirmed';
+export type NativeRegistration = 'registered' | 'pending' | 'invalid' | 'unconfigured' | 'busy' | 'unconfirmed';
 const decode = (value: string) => Buffer.from(value, 'base64url');
 
 /** Accepts only well-formed subscriptions on known push services, so the server never fetches arbitrary URLs. */
@@ -80,10 +79,10 @@ export function createPush(options: { db: Database; dataDir: string; origin: str
          * only after the device echoes a nonce pushed to that token (confirmNative), so nobody can redirect
          * another device's notifications by registering its token. Until then any existing binding stays.
          * PushKit VoIP tokens cannot take a silent nonce push (iOS requires every VoIP push to report a call),
-         * so they bind only beside a confirmed APNs token of the same app install. Ownership of a VoIP token
-         * cannot be proven, so no binding is permanent: a newer claim from a confirmed install takes it over
-         * once the current binding is VOIP_HOLD old. A squatter can therefore delay, never keep, a device's
-         * call pushes (the device re-registers on every launch); calls also fall back to the APNs alert.
+         * so they bind only beside a confirmed APNs token of the same app install. An unclaimed VoIP token binds
+         * directly; one already held by another session moves only with proof: a VoIP push carrying a nonce,
+         * which the app reports to CallKit and ends immediately. A squatter is evicted by the real device,
+         * and nobody can take over a device's token without receiving its pushes.
          */
         async registerNative(userId: string, session: string, platform: unknown, value: unknown, installId: unknown): Promise<NativeRegistration> {
             const token = validNativeToken(platform, value);
@@ -97,8 +96,8 @@ export function createPush(options: { db: Database; dataDir: string; origin: str
             })();
             if (platform === 'apns-voip') {
                 if (!db.query("SELECT 1 FROM push_native WHERE platform = 'apns' AND session_hash = ? AND install_id = ?").get(session, installId)) return 'unconfirmed';
-                if (bound && bound.session_hash !== session && now() - bound.created_at < VOIP_HOLD) return 'conflict';
-                bind(); return 'registered';
+                if (!bound || bound.session_hash === session) { bind(); return 'registered'; }
+                // Contested: fall through to the nonce proof below (sent over VoIP).
             }
             db.query('DELETE FROM push_native_pending WHERE expires_at <= ?').run(now());
             const pending = db.query<{ count: number }, [string, string, string, string]>('SELECT COUNT(*) AS count FROM push_native_pending WHERE user_id = ? AND NOT (platform = ? AND token = ? AND session_hash = ?)').get(userId, platform as string, token, session)!.count;
@@ -116,12 +115,13 @@ export function createPush(options: { db: Database; dataDir: string; origin: str
         /** Completes a registration with the nonce the device received; single use, two-minute lifetime. */
         confirmNative(userId: string, session: string, platform: unknown, value: unknown, nonce: unknown) {
             const token = validNativeToken(platform, value);
-            if (!token || platform === 'apns-voip' || typeof nonce !== 'string' || nonce.length > 64) return false;
+            if (!token || typeof nonce !== 'string' || nonce.length > 64) return false;
             const row = db.query<{ install_id: string; nonce_hash: Uint8Array; expires_at: number }, [string, string, string, string]>(
                 'SELECT install_id, nonce_hash, expires_at FROM push_native_pending WHERE platform = ? AND token = ? AND session_hash = ? AND user_id = ?').get(platform as string, token, session, userId);
             // One attempt per nonce: right or wrong, the pending registration is spent.
             db.query('DELETE FROM push_native_pending WHERE platform = ? AND token = ? AND session_hash = ?').run(platform as string, token, session);
             if (!row || row.expires_at <= now() || !timingSafeEqual(Buffer.from(row.nonce_hash), digest(nonce))) return false;
+            if (platform === 'apns-voip' && !db.query("SELECT 1 FROM push_native WHERE platform = 'apns' AND session_hash = ? AND install_id = ?").get(session, row.install_id)) return false;
             db.transaction(() => {
                 db.query('INSERT OR REPLACE INTO push_native (platform, token, user_id, session_hash, install_id, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(platform as string, token, userId, session, row.install_id, now());
                 db.query('DELETE FROM push_native WHERE user_id = ?1 AND rowid NOT IN (SELECT rowid FROM push_native WHERE user_id = ?1 ORDER BY created_at DESC LIMIT ?2)').run(userId, MAX_NATIVE_PER_USER);
