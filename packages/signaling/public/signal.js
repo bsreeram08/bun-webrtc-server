@@ -40,21 +40,51 @@
     } catch { return false; }
   }
   // Private keys stay non-extractable CryptoKeys; only public halves are exported.
-  // X25519 private keys are kept as PKCS#8 bytes, not CryptoKey objects: Safari/WebKit stores X25519 CryptoKeys
-  // in IndexedDB as empty objects, so every reload silently produced new keys. The bytes are re-imported as a
-  // non-extractable key when used (cached per public key). Pairs stored by older versions (keyPair) still work.
+  // X25519 private keys are stored wrapped (AES-256-GCM) under a non-extractable wrapping key, not as
+  // CryptoKey objects: Safari/WebKit stores X25519 CryptoKeys in IndexedDB as empty objects, so every reload
+  // silently produced new keys. Wrapping keeps the private bytes out of plain storage; they are unwrapped
+  // into non-extractable keys when used (cached per public key). Older pairs ({keyPair} from before, or
+  // {priv} plain PKCS#8 from the first Safari fix) are still read.
   const privateKeys = new Map();
+  let wrapping;
+  function wrappingKey() {
+    return wrapping ||= (async () => {
+      const make = () => subtle().generateKey({ name: 'AES-GCM', length: 256 }, false, ['wrapKey', 'unwrapKey']);
+      if (!globalThis.indexedDB) return make(); // Tests and non-browser hosts: an in-memory key for this process.
+      const db = await new Promise((resolve, reject) => {
+        const request = indexedDB.open('webrtc-bun-wrap-v1', 1);
+        request.onupgradeneeded = () => request.result.createObjectStore('kv');
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(coded('storage', 'Could not open key storage'));
+      });
+      const read = () => new Promise((resolve, reject) => { const r = db.transaction('kv').objectStore('kv').get('key'); r.onsuccess = () => resolve(r.result); r.onerror = () => reject(coded('storage', 'Could not read key storage')); });
+      let key = await read();
+      if (!(key instanceof CryptoKey)) {
+        const fresh = await make();
+        // add() rather than put(): two tabs racing must agree on one key, so the loser re-reads the winner's.
+        await new Promise(resolve => { const tx = db.transaction('kv', 'readwrite'); tx.objectStore('kv').add(fresh, 'key'); tx.oncomplete = tx.onerror = tx.onabort = () => resolve(); });
+        key = await read();
+        if (!(key instanceof CryptoKey)) throw coded('storage', 'This browser cannot keep encryption keys');
+      }
+      return key;
+    })().catch(error => { wrapping = undefined; throw error; });
+  }
   async function dhPair() {
     const keyPair = await subtle().generateKey({ name: 'X25519' }, true, ['deriveBits']);
-    return { priv: new Uint8Array(await subtle().exportKey('pkcs8', keyPair.privateKey)), pub: new Uint8Array(await subtle().exportKey('raw', keyPair.publicKey)) };
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const wrapped = new Uint8Array(await subtle().wrapKey('pkcs8', keyPair.privateKey, await wrappingKey(), { name: 'AES-GCM', iv }));
+    return { wrapped, iv, pub: new Uint8Array(await subtle().exportKey('raw', keyPair.publicKey)) };
   }
   async function privateKeyOf(pair) {
     if (pair.keyPair?.privateKey) return pair.keyPair.privateKey;
-    if (!ArrayBuffer.isView(pair.priv)) throw coded('storage', 'Encryption key is missing from this browser’s storage');
     const id = b64(pair.pub);
     if (!privateKeys.has(id)) {
+      let key;
+      if (ArrayBuffer.isView(pair.wrapped) && ArrayBuffer.isView(pair.iv)) key = await subtle().unwrapKey('pkcs8', pair.wrapped, await wrappingKey(), { name: 'AES-GCM', iv: pair.iv }, { name: 'X25519' }, false, ['deriveBits']).catch(() => { throw coded('storage', 'Encryption key could not be unlocked in this browser'); });
+      else if (ArrayBuffer.isView(pair.priv)) key = await subtle().importKey('pkcs8', pair.priv, { name: 'X25519' }, false, ['deriveBits']);
+      else throw coded('storage', 'Encryption key is missing from this browser’s storage');
       if (privateKeys.size > 256) privateKeys.clear();
-      privateKeys.set(id, await subtle().importKey('pkcs8', pair.priv, { name: 'X25519' }, false, ['deriveBits']));
+      privateKeys.set(id, key);
     }
     return privateKeys.get(id);
   }
@@ -235,7 +265,7 @@
         value = await generateIdentity(); await backend.put('identity', value);
         // Read it back: a browser that cannot keep these keys must fail loudly, not mint new keys on every call.
         const kept = await backend.get('identity');
-        if (!kept?.sign?.privateKey || !ArrayBuffer.isView(kept.dh?.priv) || kept.pub?.dh !== value.pub.dh) throw coded('storage', 'This browser cannot keep encryption keys');
+        if (!kept?.sign?.privateKey || !ArrayBuffer.isView(kept.dh?.wrapped) || kept.pub?.dh !== value.pub.dh) throw coded('storage', 'This browser cannot keep encryption keys');
       }
       return value;
     }
