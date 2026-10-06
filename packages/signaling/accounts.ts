@@ -32,7 +32,8 @@ const random = (bytes: number) => randomBytes(bytes).toString('base64url');
 const headers = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' };
 const json = (value: unknown, status = 200, extra: Record<string, string> = {}) => Response.json(value, { status, headers: { ...headers, ...extra } });
 async function readBody(request: Request): Promise<Record<string, any> | null> {
-    try { const value = await request.json(); return value && typeof value === 'object' && !Array.isArray(value) ? value : null; } catch { return null; }
+    // Measured on the bytes read, before parsing: the server's Content-Length rule is the first line, this the second.
+    try { const text = await request.text(); if (text.length > 131072) return null; const value = JSON.parse(text); return value && typeof value === 'object' && !Array.isArray(value) ? value : null; } catch { return null; }
 }
 
 export function openDatabase(dataDir: string) {
