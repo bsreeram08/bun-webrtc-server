@@ -422,6 +422,18 @@ describe('key rotation', () => {
         expect(alice.map.get('sessions:bob')).toBeUndefined();
         expect((await A.identity()).pub).not.toEqual(oldIdentity);
     });
+    test('an identity reset during a first-message decrypt completes instead of deadlocking', async () => {
+        const { A, B, bundleOf } = await people();
+        const first = await B.encryptTo('alice', { n: 1 }, () => bundleOf(A)); // A new X3DH session for alice.
+        let release: () => void = () => {};
+        const held = new Promise<void>(resolve => { release = resolve; });
+        const receiving = A.decryptFrom('bob', first, async () => { await held; }); // In flight, before its claim commit.
+        await Bun.sleep(5);
+        const reset = A.resetIdentity();
+        release();
+        const outcome = await Promise.race([Promise.all([receiving, reset]).then(() => 'done'), Bun.sleep(2000).then(() => 'deadlock')]);
+        expect(outcome).toBe('done');
+    });
     test('a reset arriving on an old session is ignored and never makes an old chain the survivor', async () => {
         const { bob, A, B, bundleOf, deliver } = await people();
         await deliver(B, 'alice', await A.encryptTo('bob', { n: 1 }, () => bundleOf(B)));

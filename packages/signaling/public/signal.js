@@ -207,8 +207,10 @@
     // An identity reset holds this barrier: every queued task waits, so nothing writes keys of the old identity
     // after (or while) they are erased.
     let barrier = Promise.resolve();
-    function serial(key, task) {
-      const previous = locks.get(key) || Promise.resolve(), gate = barrier;
+    // `inner` marks a lock taken by a task that is already running (decryptFrom's x3dh claim/commit): it must
+    // not wait on the barrier, or a reset waiting for that task would deadlock with it.
+    function serial(key, task, inner = false) {
+      const previous = locks.get(key) || Promise.resolve(), gate = inner ? null : barrier;
       const next = Promise.all([previous.catch(() => {}), gate]).then(task);
       locks.set(key, next.catch(() => {}));
       return next;
@@ -318,7 +320,7 @@
         const counter = `claims:${spkId}:${contactId}`, count = await backend.get(counter) || 0;
         if (count >= MAX_CLAIMS_PER_CONTACT) throw coded('claim-limit', 'Too many new sessions from this contact');
         await backend.batch([{ put: key, value: { contact: contactId, done: false } }, { put: counter, value: count + 1 }]);
-      });
+      }, true);
     }
     function decryptFrom(contactId, envelope, handle) {
       return serial(`contact:${contactId}`, async () => {
@@ -363,7 +365,7 @@
           if (x.opk !== null) writes.push({ delete: `opk:${x.opk}` });
         }
         // The claim's x3dh lock keeps a concurrent claim for this ek from interleaving with completion.
-        await (fresh ? serial('x3dh', () => backend.batch(writes)) : backend.batch(writes));
+        await (fresh ? serial('x3dh', () => backend.batch(writes), true) : backend.batch(writes));
       });
     }
     const only = (record, sid) => ({ active: sid, list: { [sid]: record.list[sid] }, order: [sid] });
