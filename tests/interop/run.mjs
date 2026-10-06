@@ -37,13 +37,14 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 function memory() {
     const map = new Map();
     return {
+        sids: contact => map.get(`sessions:${contact}`)?.order ?? [],
         get: async key => map.get(key), put: async (key, value) => { map.set(key, value); }, delete: async key => { map.delete(key); },
         deletePrefix: async prefix => { for (const key of [...map.keys()]) if (key.startsWith(prefix)) map.delete(key); },
         batch: async writes => { for (const write of writes) if ('put' in write) map.set(write.put, write.value); else map.delete(write.delete); },
     };
 }
 function jsParty(name) {
-    const box = Signal.box(memory());
+    const store = memory(), box = Signal.box(store);
     return {
         kind: 'js', name,
         async bundle(withOpk = true) {
@@ -57,9 +58,13 @@ function jsParty(name) {
         },
         async receive(contact, envelope) {
             let payload = null, info = null;
-            try { await box.decryptFrom(contact, envelope, async (value, details) => { payload = value; info = details; }); return { payload, info }; }
+            // Like account.js: a {type:'rotate'} payload answers { rotate: true } so the box keeps only the new session.
+            try { await box.decryptFrom(contact, envelope, async (value, details) => { payload = value; info = details; return value?.type === 'rotate' ? { rotate: true } : undefined; }); return { payload, info }; }
             catch (error) { return { code: error.code ?? null, error: error.message }; }
         },
+        rotate: contact => box.rotate(contact),
+        sessionInfo: contact => box.sessionInfo(contact),
+        sids: async contact => store.sids(contact),
         safety: (me, contact, them) => box.safety(me, contact, them),
         peer: contact => box.peer(contact),
         acceptChange: contact => box.acceptChange(contact),
@@ -89,11 +94,17 @@ function rustParty(name) {
             return 'error' in result ? { code: result.code, error: result.error } : { envelope: result.ok.envelope };
         },
         async receive(contact, envelope) {
-            const result = await call({ cmd: 'decrypt', contact, envelope });
+            // Two-phase, as the app does: decrypt, look at the payload, then commit (with rotate for a session reset).
+            const result = await call({ cmd: 'decrypt', contact, envelope, commit: false });
             if ('error' in result) return { code: result.code, error: result.error };
-            const ok = result.ok;
-            return { payload: JSON.parse(ok.plaintext), info: { identityChanged: ok.identityChanged, firstContact: ok.firstContact, identity: ok.identity } };
+            const ok = result.ok, payload = JSON.parse(ok.plaintext);
+            const committed = await call({ cmd: 'commit', pendingId: ok.pendingId, rotate: payload?.type === 'rotate' });
+            if ('error' in committed) return { code: committed.code, error: committed.error };
+            return { payload, info: { identityChanged: ok.identityChanged, firstContact: ok.firstContact, identity: ok.identity } };
         },
+        rotate: async contact => unwrap({ cmd: 'rotate', contact }),
+        sessionInfo: async contact => unwrap({ cmd: 'sessionInfo', contact }),
+        sids: async contact => unwrap({ cmd: 'sids', contact }),
         safety: async (me, contact, them) => unwrap({ cmd: 'safety', me, contact, them }),
         peer: async contact => unwrap({ cmd: 'peer', contact }),
         acceptChange: async contact => unwrap({ cmd: 'acceptChange', contact }),
@@ -262,6 +273,62 @@ await scenario('safety numbers match on both sides', async (label, open, makeA, 
     const fromB = await b.safety('bob', 'alice', 'alice');
     check(fromA?.number && fromA.number === fromB?.number, `${label}: ${fromA?.number} vs ${fromB?.number}`);
     check(/^(\d{5} ){11}\d{5}$/.test(fromA?.number || ''), `${label}: 60 digits in groups of five`);
+});
+
+// ---------- Chat key rotation ----------
+const rotateMessage = n => ({ v: 1, type: 'rotate', id: `00000000-0000-4000-9000-${String(n).padStart(12, '0')}`, reason: 'manual' });
+
+await scenario('rotation: a fresh X3DH session, in-flight messages still decrypt, then both sides drop old chains', async (label, open, makeA, makeB) => {
+    const { a, b, toB, toA } = await open(makeA, makeB, true);
+    check((await b.receive('alice', (await toB(message('hi', 1))).envelope)).payload, `${label}: first`);
+    check((await a.receive('bob', (await toA(message('yo', 2))).envelope)).payload, `${label}: reply`);
+    const old = (await a.sessionInfo('bob'))?.sid;
+    const inFlight = (await toA(message('late from bob', 3))).envelope; // Sent on the old session.
+    await a.rotate('bob');
+    const rotation = (await a.send('bob', rotateMessage(4), async () => b.bundle(true))).envelope;
+    check(rotation && 'x' in decode(rotation), `${label}: the rotation opens a new X3DH session`);
+    const fresh = (await a.sessionInfo('bob'))?.sid;
+    check(fresh && fresh !== old, `${label}: new active session`);
+    check((await a.receive('bob', inFlight)).payload?.text === 'late from bob', `${label}: in-flight message on the old session decrypts`);
+    check((await a.sessionInfo('bob'))?.sid === fresh, `${label}: the late message does not undo the rotation`);
+    const got = await b.receive('alice', rotation);
+    check(got.payload?.type === 'rotate', `${label}: peer receives the reset (${got.error})`);
+    check(eq(await b.sids('alice'), [fresh]), `${label}: peer keeps only the new session`);
+    const answer = (await toA(message('on the new one', 5))).envelope;
+    check(!('x' in decode(answer)), `${label}: the peer answers on the new session`);
+    check((await a.receive('bob', answer)).payload?.text === 'on the new one', `${label}: answer decrypts`);
+    check(eq(await a.sids('bob'), [fresh]), `${label}: rotator drops its old chains once answered`);
+    check((await a.receive('bob', inFlight)).code === 'unknown-session', `${label}: the dropped old session cannot decrypt`);
+    check((await a.safety('alice', 'bob', 'bob'))?.number === (await b.safety('bob', 'alice', 'alice'))?.number, `${label}: security code unchanged by rotation`);
+});
+
+await scenario('rotation: a pending rotation is not revived by a late message', async (label, open, makeA, makeB) => {
+    const { a, b, toB, toA } = await open(makeA, makeB, true);
+    await b.receive('alice', (await toB(message('hi', 1))).envelope);
+    await a.receive('bob', (await toA(message('yo', 2))).envelope);
+    const old = (await a.sessionInfo('bob'))?.sid;
+    const late = (await toA(message('late', 3))).envelope;
+    await a.rotate('bob');
+    check((await a.receive('bob', late)).payload?.text === 'late', `${label}: late message decrypts`);
+    const next = (await a.send('bob', message('next', 4), async () => b.bundle(true))).envelope;
+    check(next && 'x' in decode(next), `${label}: the next send still opens a new session`);
+    check((await a.sessionInfo('bob'))?.sid !== old, `${label}: old session not reactivated`);
+    check((await b.receive('alice', next)).payload?.text === 'next', `${label}: peer decrypts the new session`);
+});
+
+await scenario('rotation: a reset arriving on an old session is ignored', async (label, open, makeA, makeB) => {
+    const { a, b, toB, toA } = await open(makeA, makeB, true);
+    await b.receive('alice', (await toB(message('hi', 1))).envelope);
+    await a.receive('bob', (await toA(message('yo', 2))).envelope);
+    const stale = (await toB(rotateMessage(3))).envelope; // A reset sent on the old session.
+    await a.rotate('bob');
+    const opening = (await a.send('bob', message('new', 4), async () => b.bundle(true))).envelope;
+    check((await b.receive('alice', opening)).payload?.text === 'new', `${label}: new session opens`);
+    const fresh = (await b.sessionInfo('alice'))?.sid;
+    check((await b.sids('alice')).length === 2, `${label}: two sessions before the stale reset`);
+    check((await b.receive('alice', stale)).payload?.type === 'rotate', `${label}: stale reset decrypts`);
+    const after = await b.sids('alice');
+    check(after.length === 2 && after.includes(fresh), `${label}: nothing pruned by a reset on an old session (${after.length})`);
 });
 
 // ---------- Call verification code ----------

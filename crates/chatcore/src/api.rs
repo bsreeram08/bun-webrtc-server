@@ -16,9 +16,13 @@ fn with<T>(work: impl FnOnce(&mut Core) -> Result<T>) -> Result<T> {
     work(core)
 }
 
-/// Opens (or creates) the account's key database. Call once per signed-in account.
-pub fn init(db_path: String) -> Result<()> {
-    let core = Core::new(Box::new(SqliteStore::open(&db_path)?));
+/// Opens (or creates) the account's key database. Call once per signed-in account. `store_key` is 32 random
+/// bytes the app keeps in the platform keystore; every stored value is sealed with it (AES-256-GCM).
+pub fn init(db_path: String, store_key: Option<Vec<u8>>) -> Result<()> {
+    let key = store_key
+        .map(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| ChatError::coded("invalid", "store key must be 32 bytes")))
+        .transpose()?;
+    let core = Core::new(Box::new(SqliteStore::open_with_key(&db_path, key)?));
     *CORE.lock().map_err(|_| ChatError::transient("Core lock poisoned"))? = Some(core);
     Ok(())
 }
@@ -45,7 +49,8 @@ pub fn decrypt_from(contact_id: String, envelope: String, published_identity: Op
 }
 
 /// Phase two: persist the ratchet advance. Returns true when a changed identity was recorded.
-pub fn commit(pending_id: String) -> Result<bool> { with(|core| core.commit(&pending_id)) }
+/// `rotate` is true when the stored payload was the peer's `{type:'rotate'}` session reset.
+pub fn commit(pending_id: String, rotate: bool) -> Result<bool> { with(|core| core.commit(&pending_id, rotate)) }
 
 pub fn abort(pending_id: String) -> Result<()> { with(|core| { core.abort(&pending_id); Ok(()) }) }
 
@@ -57,6 +62,28 @@ pub fn peer(contact_id: String) -> Result<Option<PeerRecord>> { with(|core| core
 pub fn set_verified(contact_id: String, verified: bool) -> Result<()> { with(|core| core.set_verified(&contact_id, verified)) }
 pub fn accept_change(contact_id: String) -> Result<()> { with(|core| core.accept_change(&contact_id)) }
 pub fn forget(contact_id: String) -> Result<()> { with(|core| core.forget(&contact_id)) }
+
+/// Records an identity the server published for a contact (key-change events); a change is flagged and blocks sending.
+pub fn note_peer(contact_id: String, identity: IdentityPub) -> Result<()> { with(|core| core.note_peer(&contact_id, &identity).map(|_| ())) }
+
+/// Chat key rotation: the next message to this contact opens a fresh session.
+pub fn rotate(contact_id: String) -> Result<()> { with(|core| core.rotate(&contact_id)) }
+
+/// The active session with a contact: id and start time (Unix ms), for scheduled rotation.
+pub fn session_info(contact_id: String) -> Result<Option<SessionInfo>> {
+    with(|core| Ok(core.session_info(&contact_id)?.map(|(sid, started_at)| SessionInfo { sid, started_at })))
+}
+
+/// Replaces this device's identity (explicit user action only); contacts see a security-code change.
+pub fn reset_identity() -> Result<()> { with(|core| core.reset_identity()) }
+
+/// Chat key rotation schedule: the shorter non-off interval of the two sides wins (0 = off).
+pub fn rotation_interval(mine: u64, theirs: u64) -> u64 { crate::core::rotation_interval(mine, theirs) }
+
+pub struct SessionInfo {
+    pub sid: String,
+    pub started_at: u64,
+}
 
 // ---------- Call verification (verify.js) ----------
 pub fn sas_new_nonce() -> String { sas::new_nonce() }

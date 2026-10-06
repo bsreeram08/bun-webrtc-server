@@ -40,13 +40,23 @@ fn run(core: &mut Core, command: &Value) -> Result<Value, ChatError> {
             };
             let decrypted = core.decrypt_from(&text(command, "contact")?, &text(command, "envelope")?, published.as_ref())?;
             let commit = command.get("commit").and_then(Value::as_bool).unwrap_or(true);
-            let recorded = if commit { Some(core.commit(&decrypted.pending_id)?) } else { None };
+            // `rotate`: the app treats this payload as the peer's session reset (signal.js handle() → {rotate:true}).
+            let rotate = command.get("rotate").and_then(Value::as_bool).unwrap_or(false);
+            let recorded = if commit { Some(core.commit(&decrypted.pending_id, rotate)?) } else { None };
             Ok(json!({
                 "plaintext": decrypted.plaintext_json, "identityChanged": decrypted.identity_changed, "firstContact": decrypted.first_contact,
                 "identity": decrypted.identity, "pendingId": decrypted.pending_id, "identityRecorded": recorded,
             }))
         }
-        "commit" => Ok(json!(core.commit(&text(command, "pendingId")?)?)),
+        "commit" => Ok(json!(core.commit(&text(command, "pendingId")?, command.get("rotate").and_then(Value::as_bool).unwrap_or(false))?)),
+        "rotate" => { core.rotate(&text(command, "contact")?)?; Ok(Value::Null) }
+        "sessionInfo" => Ok(match core.session_info(&text(command, "contact")?)? { Some((sid, started)) => json!({ "sid": sid, "startedAt": started }), None => Value::Null }),
+        "sids" => {
+            let contact = text(command, "contact")?;
+            let record = core.store_mut().get(&format!("sessions:{contact}"))?;
+            Ok(record.and_then(|value| value.get("order").cloned()).unwrap_or(json!([])))
+        }
+        "resetIdentity" => { core.reset_identity()?; Ok(Value::Null) }
         "safety" => Ok(match core.safety(&text(command, "me")?, &text(command, "contact")?, &text(command, "them")?)? {
             Some(safety) => json!({ "number": safety.number, "verified": safety.verified, "changed": safety.changed, "blocked": safety.blocked }),
             None => Value::Null,
@@ -70,7 +80,8 @@ fn main() {
     let path = std::env::args().nth(1);
     let store: Box<dyn chatcore::store::Store> = match path.as_deref() {
         None | Some(":mem:") => Box::new(MemoryStore::default()),
-        Some(path) => Box::new(SqliteStore::open(path).expect("open database")),
+        // Sealed at rest, as the apps run it (a fresh store key per party).
+        Some(path) => Box::new(SqliteStore::open_with_key(path, Some(chatcore::primitives::random_bytes::<32>())).expect("open database")),
     };
     let mut core = Core::new(store);
     let stdin = io::stdin();

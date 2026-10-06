@@ -17,6 +17,14 @@ use crate::protocol::*;
 use crate::store::{Store, Write};
 
 const WEEK_MS: u64 = 7 * 86_400_000;
+const DAY_MS: u64 = 86_400_000;
+/// Rotation schedule choices (signal.js `ROTATION_CHOICES`); anything else is ignored, never trusted.
+pub const ROTATION_CHOICES: [u64; 4] = [0, DAY_MS, 7 * DAY_MS, 30 * DAY_MS];
+
+/// The shorter non-off interval wins; off on both sides (or unknown values) means no rotation.
+pub fn rotation_interval(mine: u64, theirs: u64) -> u64 {
+    [mine, theirs].into_iter().filter(|value| *value > 0 && ROTATION_CHOICES.contains(value)).min().unwrap_or(0)
+}
 const MAX_PENDING: usize = 256;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -24,6 +32,12 @@ pub struct SessionRecord {
     pub active: Option<String>,
     pub list: BTreeMap<String, State>,
     pub order: Vec<String>,
+    /// A manual or scheduled rotation is pending: the next send opens a new session (signal.js `rotating`).
+    #[serde(default)]
+    pub rotating: bool,
+    /// The session our rotation opened; old chains go once the peer answers on it (signal.js `rotatedTo`).
+    #[serde(default, rename = "rotatedTo")]
+    pub rotated_to: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -117,8 +131,16 @@ fn remember(mut record: SessionRecord, state: State, make_active: bool) -> Sessi
         record.list.remove(&oldest);
     }
     let active_missing = record.active.as_ref().is_none_or(|active| !record.list.contains_key(active));
-    if make_active || active_missing { record.active = Some(sid); }
+    // While a rotation is pending nothing old may become active again: the next send must open a new session.
+    if make_active || (!record.rotating && active_missing) { record.active = Some(sid); }
     record
+}
+
+/// Keeps only one session (signal.js `only`), clearing any rotation state.
+fn only(record: SessionRecord, sid: &str) -> SessionRecord {
+    let mut list = BTreeMap::new();
+    if let Some(state) = record.list.get(sid) { list.insert(sid.to_string(), state.clone()); }
+    SessionRecord { active: Some(sid.to_string()), list, order: vec![sid.to_string()], rotating: false, rotated_to: None }
 }
 
 impl Core {
@@ -207,14 +229,18 @@ impl Core {
         self.assert_sendable(contact)?;
         let mut record = self.sessions(contact)?;
         let active = record.active.as_ref().and_then(|sid| record.list.get(sid)).filter(|state| state.cks.is_some()).cloned();
-        let state = match active {
+        let state = match active.filter(|_| !record.rotating) {
             Some(state) => state,
             None => {
                 let Some(bundle) = bundle else { return Ok(EncryptOutcome::NeedsBundle) };
                 self.note_peer(contact, &bundle.identity)?;
                 self.assert_sendable(contact)?;
                 record = self.sessions(contact)?;
-                initiate(&self.identity()?, bundle)?
+                let state = initiate(&self.identity()?, bundle)?;
+                // A manual or scheduled rotation: older sessions stay (bounded) so messages already in flight
+                // still decrypt, and are dropped once the peer answers on this new one.
+                if record.rotating { record.rotating = false; record.rotated_to = Some(state.sid.clone()); }
+                state
             }
         };
         let (next, envelope) = encrypt(&state, plaintext_json.as_bytes())?;
@@ -282,7 +308,8 @@ impl Core {
 
     /// Persists the ratchet advance (and, for a new session, the pinned identity, the completed claim and
     /// the one-time prekey deletion) in one atomic batch. Returns whether a changed identity was recorded.
-    pub fn commit(&mut self, pending_id: &str) -> Result<bool> {
+    /// `rotate`: the stored message was the peer's session reset (signal.js handle() answering `{ rotate: true }`).
+    pub fn commit(&mut self, pending_id: &str, rotate: bool) -> Result<bool> {
         let pending = self.pending.remove(pending_id).ok_or_else(|| ChatError::transient("Unknown or expired pending message; decrypt again"))?;
         self.pending_order.retain(|id| id != pending_id);
         let key = format!("sessions:{}", pending.contact);
@@ -296,7 +323,19 @@ impl Core {
             changed = was_changed;
             writes.extend(peer_writes.into_iter().filter(|write| !matches!(write, Write::Delete(k) if k == &key)));
         }
-        writes.push(Write::Put(key, to_value(&remember(record, pending.state, true))));
+        let fresh = pending.fresh.is_some();
+        let sid = pending.state.sid.clone();
+        // A late message on an old session must not undo a rotation in progress. A fresh session from the
+        // peer is itself new keys, so it simply becomes the one in use.
+        let keep_rotation = !fresh && (record.rotating || record.rotated_to.as_ref().is_some_and(|to| to != &sid));
+        let answered_rotation = !fresh && record.rotated_to.as_deref() == Some(sid.as_str());
+        if fresh { record.rotating = false; record.rotated_to = None; }
+        let mut next = remember(record, pending.state, !keep_rotation);
+        // The peer answered on the session we rotated to: the old chains are no longer needed.
+        if answered_rotation { next = only(next, &sid); }
+        // The peer reset the session: keep only the new one it opened; a reset on an older session is ignored.
+        if rotate && (fresh || answered_rotation) { next = only(next, &sid); }
+        writes.push(Write::Put(key, to_value(&next)));
         if let Some((spk_id, x)) = &pending.fresh {
             writes.push(Write::Put(format!("claim:{spk_id}:{}", x.ek), to_value(&Claim { contact: pending.contact.clone(), done: true })));
             if let Some(opk) = x.opk { writes.push(Write::Delete(format!("opk:{opk}"))); }
@@ -338,6 +377,37 @@ impl Core {
     }
 
     pub fn forget(&mut self, contact: &str) -> Result<()> { self.store.delete(&format!("sessions:{contact}")) }
+
+    /// Starts a fresh session (new X3DH) with the next message; older sessions stay until the peer answers.
+    pub fn rotate(&mut self, contact: &str) -> Result<()> {
+        let mut record = self.sessions(contact)?;
+        record.active = None;
+        record.rotating = true;
+        record.rotated_to = None;
+        self.store.put(&format!("sessions:{contact}"), to_value(&record))
+    }
+
+    /// The active session's id and start time; sessions from before start times were recorded count from now.
+    pub fn session_info(&mut self, contact: &str) -> Result<Option<(String, u64)>> {
+        let mut record = self.sessions(contact)?;
+        let Some(sid) = record.active.clone() else { return Ok(None) };
+        let Some(state) = record.list.get_mut(&sid) else { return Ok(None) };
+        if let Some(started) = state.started_at { return Ok(Some((sid, started))); }
+        let started = now_ms();
+        state.started_at = Some(started);
+        self.store.put(&format!("sessions:{contact}"), to_value(&record))?;
+        Ok(Some((sid, started)))
+    }
+
+    /// A new identity for this device: every session, prekey and replay record goes with the old one; pinned
+    /// contact identities stay. The API mutex serializes this against in-flight encrypt/decrypt, and pending
+    /// decrypts of the old identity are dropped so they can never be committed afterwards.
+    pub fn reset_identity(&mut self) -> Result<()> {
+        self.pending.clear();
+        self.pending_order.clear();
+        for prefix in ["sessions:", "opk:", "claim:", "claims:"] { self.store.delete_prefix(prefix)?; }
+        self.store.batch(vec![Write::Delete("identity".into()), Write::Delete("spk".into()), Write::Delete("opk-next".into())])
+    }
 
     #[doc(hidden)]
     pub fn store_mut(&mut self) -> &mut dyn Store { self.store.as_mut() }

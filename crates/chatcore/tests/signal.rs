@@ -48,7 +48,7 @@ impl Party {
     }
     fn receive(&mut self, contact: &str, envelope: &str) -> chatcore::Result<(String, bool)> {
         let decrypted = self.core.decrypt_from(contact, envelope, None)?;
-        self.core.commit(&decrypted.pending_id)?;
+        self.core.commit(&decrypted.pending_id, false)?;
         let text = serde_json::from_str::<Value>(&decrypted.plaintext_json).unwrap()["text"].as_str().unwrap().to_string();
         Ok((text, decrypted.identity_changed))
     }
@@ -182,7 +182,7 @@ fn first_contact_replies_and_one_time_prekey_consumption() {
     assert!(decrypted.first_contact && !decrypted.identity_changed);
     let opk = packet(&first)["x"]["opk"].as_u64().unwrap();
     assert!(bob.core.store_mut().get(&format!("opk:{opk}")).unwrap().is_some(), "kept until commit");
-    bob.core.commit(&decrypted.pending_id).unwrap();
+    bob.core.commit(&decrypted.pending_id, false).unwrap();
     assert!(bob.core.store_mut().get(&format!("opk:{opk}")).unwrap().is_none());
     let reply = bob.send("alice", "back", None).unwrap();
     assert_eq!(alice.receive("bob", &reply).unwrap().0, "back");
@@ -195,7 +195,7 @@ fn a_failing_store_leaves_the_ratchet_unchanged_so_the_message_can_be_processed_
     let second = alice.send("bob", "two", None).unwrap();
     let decrypted = bob.core.decrypt_from("alice", &second, None).unwrap();
     bob.fail.store(1, Ordering::SeqCst);
-    assert_eq!(bob.core.commit(&decrypted.pending_id).unwrap_err().code.as_deref(), Some("storage"));
+    assert_eq!(bob.core.commit(&decrypted.pending_id, false).unwrap_err().code.as_deref(), Some("storage"));
     assert_eq!(bob.receive("alice", &second).unwrap().0, "two");
     assert_eq!(code(bob.receive("alice", &second)).as_deref(), Some("replay"));
 }
@@ -207,7 +207,7 @@ fn a_concurrent_update_between_decrypt_and_commit_is_refused_as_transient() {
     let second = alice.send("bob", "two", None).unwrap();
     let pending = bob.core.decrypt_from("alice", &second, None).unwrap();
     bob.send("alice", "meanwhile", None).unwrap(); // advances bob's stored session
-    assert_eq!(bob.core.commit(&pending.pending_id).unwrap_err().code, None);
+    assert_eq!(bob.core.commit(&pending.pending_id, false).unwrap_err().code, None);
     assert_eq!(bob.receive("alice", &second).unwrap().0, "two");
 }
 
@@ -269,7 +269,7 @@ fn one_initial_envelope_as_if_from_two_contacts_opens_at_most_one_session() {
     let (_a2, mut bob2, first2) = pair(false);
     let pending = bob2.core.decrypt_from("alice", &first2, None).unwrap();
     assert_eq!(code(bob2.core.decrypt_from("mallory", &first2, None)).as_deref(), Some("replay"));
-    bob2.core.commit(&pending.pending_id).unwrap();
+    bob2.core.commit(&pending.pending_id, false).unwrap();
 }
 
 #[test]
@@ -372,4 +372,195 @@ fn sas_codes_are_order_independent_and_fail_closed_on_ambiguous_fingerprints() {
     assert!(sas::fingerprints("v=0\r\n").is_err());
     let commitment = sas::commitment(&n1).unwrap();
     assert!(sas::check_reveal(&commitment, &n1) && !sas::check_reveal(&commitment, &n2));
+}
+
+// ---------- Key database sealed at rest ----------
+#[test]
+fn a_sealed_key_database_reveals_no_secrets_and_needs_its_key() {
+    use chatcore::store::SqliteStore;
+    let dir = std::env::temp_dir().join(format!("chatcore-sealed-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("keys.sqlite").to_string_lossy().to_string();
+    let key = [7u8; 32];
+    let private;
+    {
+        let mut core = Core::new(Box::new(SqliteStore::open_with_key(&path, Some(key)).unwrap()));
+        core.prekeys(NOW, None).unwrap();
+        core.one_time_prekeys(3).unwrap();
+        private = serde_json::to_string(&core.store_mut().get("identity").unwrap().unwrap()).unwrap();
+    }
+    let raw = std::fs::read(&path).unwrap();
+    let wal = std::fs::read(format!("{path}-wal")).unwrap_or_default();
+    let needle = &private[private.len() / 2..private.len() / 2 + 24];
+    for bytes in [&raw, &wal] { assert!(!bytes.windows(needle.len()).any(|window| window == needle.as_bytes()), "identity found in plain text"); }
+    // The right key reopens it; no key or another key is a storage error, never silently new keys.
+    let mut again = Core::new(Box::new(SqliteStore::open_with_key(&path, Some(key)).unwrap()));
+    assert_eq!(serde_json::to_string(&again.store_mut().get("identity").unwrap().unwrap()).unwrap(), private);
+    assert_eq!(SqliteStore::open(&path).err().and_then(|error| error.code).as_deref(), Some("storage"));
+    assert_eq!(SqliteStore::open_with_key(&path, Some([8u8; 32])).err().and_then(|error| error.code).as_deref(), Some("storage"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Someone who can write the file (but has no store key) must not be able to plant or move state.
+#[test]
+fn a_sealed_key_database_fails_closed_on_tampering() {
+    use chatcore::store::SqliteStore;
+    let dir = std::env::temp_dir().join(format!("chatcore-tamper-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let key = [9u8; 32];
+    let fresh = |name: &str| {
+        let path = dir.join(name).to_string_lossy().to_string();
+        let mut store = SqliteStore::open_with_key(&path, Some(key)).unwrap();
+        store.put("peer:alice", json!({ "identity": "alice-pin" })).unwrap();
+        store.put("peer:bob", json!({ "identity": "bob-pin" })).unwrap();
+        drop(store);
+        (path.clone(), rusqlite::Connection::open(&path).unwrap())
+    };
+    let row = |db: &rusqlite::Connection, key: &str| -> String { db.query_row("SELECT value FROM kv WHERE key = ?1", [key], |r| r.get(0)).unwrap() };
+    // The whole database is refused at open: one bad row never yields a partially trusted store.
+    let refused = |path: &str| SqliteStore::open_with_key(path, Some(key)).err().and_then(|error| error.code);
+
+    // 1. A tampered ciphertext.
+    let (path, db) = fresh("tampered.sqlite");
+    let value = row(&db, "peer:alice");
+    let flipped = format!("{}{}", &value[..value.len() - 1], if value.ends_with('A') { 'B' } else { 'A' });
+    db.execute("UPDATE kv SET value = ?1 WHERE key = 'peer:alice'", [flipped]).unwrap();
+    assert_eq!(refused(&path).as_deref(), Some("storage"));
+
+    // 2. A valid ciphertext moved to another row (bob's pin planted onto alice).
+    let (path, db) = fresh("swapped.sqlite");
+    db.execute("UPDATE kv SET value = ?1 WHERE key = 'peer:alice'", [row(&db, "peer:bob")]).unwrap();
+    assert_eq!(refused(&path).as_deref(), Some("storage"));
+
+    // 3. A ciphertext from another store sealed with the same key (different store id).
+    let (path, db) = fresh("cross.sqlite");
+    let (_, other) = fresh("cross-other.sqlite");
+    db.execute("UPDATE kv SET value = ?1 WHERE key = 'peer:alice'", [row(&other, "peer:alice")]).unwrap();
+    assert_eq!(refused(&path).as_deref(), Some("storage"));
+
+    // 4. A plaintext row injected after migration.
+    let (path, db) = fresh("injected.sqlite");
+    db.execute("UPDATE kv SET value = '{\"identity\":\"attacker\"}' WHERE key = 'peer:alice'", []).unwrap();
+    db.execute("INSERT INTO kv (key, value) VALUES ('peer:mallory', '{\"identity\":\"attacker\"}')", []).unwrap();
+    assert_eq!(refused(&path).as_deref(), Some("storage"));
+
+    // 4b. A single planted row the app would never read still refuses the whole database.
+    let (path, db) = fresh("unread.sqlite");
+    db.execute("INSERT INTO kv (key, value) VALUES ('zzz:never-read', '{\"x\":1}')", []).unwrap();
+    assert_eq!(refused(&path).as_deref(), Some("storage"));
+
+    // 5. The marker deleted (to force a fresh "migration" of planted plaintext).
+    let (path, db) = fresh("unmarked.sqlite");
+    db.execute("DELETE FROM kv WHERE key = '__sealed'", []).unwrap();
+    db.execute("INSERT INTO kv (key, value) VALUES ('peer:mallory', '{\"identity\":\"attacker\"}')", []).unwrap();
+    assert_eq!(SqliteStore::open_with_key(&path, Some(key)).err().and_then(|error| error.code).as_deref(), Some("storage"));
+
+    // A plaintext store migrates once, then never accepts plaintext again.
+    let path = dir.join("legacy.sqlite").to_string_lossy().to_string();
+    { let mut plain = SqliteStore::open(&path).unwrap(); plain.put("identity", json!({ "secret": "legacy" })).unwrap(); }
+    { let mut sealed = SqliteStore::open_with_key(&path, Some(key)).unwrap(); assert_eq!(sealed.get("identity").unwrap().unwrap()["secret"], "legacy"); }
+    let raw: String = rusqlite::Connection::open(&path).unwrap().query_row("SELECT value FROM kv WHERE key = 'identity'", [], |r| r.get(0)).unwrap();
+    assert!(raw.starts_with("enc1:") && !raw.contains("legacy"));
+    // No pre-migration plaintext survives anywhere on disk: not in the file (freed pages), not in the WAL.
+    for suffix in ["", "-wal", "-journal"] {
+        let bytes = std::fs::read(format!("{path}{suffix}")).unwrap_or_default();
+        assert!(!bytes.windows(6).any(|window| window == b"legacy"), "plaintext left in {path}{suffix}");
+    }
+    assert!(SqliteStore::open(&path).is_err(), "a migrated store never reopens in plaintext mode");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---------- Chat key rotation (signal.js rotate / rotatedTo) ----------
+fn sids(party: &mut Party, contact: &str) -> Vec<String> {
+    party.core.store_mut().get(&format!("sessions:{contact}")).unwrap()
+        .and_then(|value| value.get("order").cloned()).map(|order| serde_json::from_value(order).unwrap()).unwrap_or_default()
+}
+fn established() -> (Party, Party) {
+    let (mut alice, mut bob, first) = pair(true);
+    bob.receive("alice", &first).unwrap();
+    let reply = bob.send("alice", "hi alice", None).unwrap();
+    alice.receive("bob", &reply).unwrap();
+    (alice, bob)
+}
+
+#[test]
+fn rotation_opens_a_fresh_session_keeps_in_flight_messages_then_drops_old_chains() {
+    let (mut alice, mut bob) = established();
+    let old = alice.core.session_info("bob").unwrap().unwrap().0;
+    let in_flight = bob.send("alice", "late", None).unwrap();
+    alice.core.rotate("bob").unwrap();
+    let rotation = alice.send("bob", "rotate", Some(&mut bob)).unwrap();
+    assert!(packet(&rotation).get("x").is_some(), "a rotation must start a new X3DH handshake");
+    let fresh = alice.core.session_info("bob").unwrap().unwrap().0;
+    assert_ne!(fresh, old);
+    assert_eq!(alice.receive("bob", &in_flight).unwrap().0, "late"); // In flight on the old session.
+    assert_eq!(alice.core.session_info("bob").unwrap().unwrap().0, fresh, "a late message must not undo the rotation");
+    let decrypted = bob.core.decrypt_from("alice", &rotation, None).unwrap();
+    bob.core.commit(&decrypted.pending_id, true).unwrap();
+    assert_eq!(sids(&mut bob, "alice"), vec![fresh.clone()]);
+    let answer = bob.send("alice", "on the new one", None).unwrap();
+    alice.receive("bob", &answer).unwrap();
+    assert_eq!(sids(&mut alice, "bob"), vec![fresh]);
+    assert_eq!(code(alice.receive("bob", &in_flight)).as_deref(), Some("unknown-session"));
+}
+
+#[test]
+fn a_pending_rotation_is_not_revived_by_a_late_message() {
+    let (mut alice, mut bob) = established();
+    let old = alice.core.session_info("bob").unwrap().unwrap().0;
+    let late = bob.send("alice", "late", None).unwrap();
+    alice.core.rotate("bob").unwrap();
+    alice.receive("bob", &late).unwrap(); // Arrives before alice sends again.
+    assert_eq!(alice.core.encrypt_to("bob", &json!({ "text": "next" }).to_string(), None).unwrap(), EncryptOutcome::NeedsBundle);
+    let next = alice.send("bob", "next", Some(&mut bob)).unwrap();
+    assert!(packet(&next).get("x").is_some());
+    assert_ne!(alice.core.session_info("bob").unwrap().unwrap().0, old);
+}
+
+#[test]
+fn a_reset_arriving_on_an_old_session_is_ignored() {
+    let (mut alice, mut bob) = established();
+    let stale = alice.send("bob", "rotate", None).unwrap(); // On the old session.
+    alice.core.rotate("bob").unwrap();
+    let opening = alice.send("bob", "new", Some(&mut bob)).unwrap();
+    bob.receive("alice", &opening).unwrap();
+    let fresh = bob.core.session_info("alice").unwrap().unwrap().0;
+    assert_eq!(sids(&mut bob, "alice").len(), 2);
+    let decrypted = bob.core.decrypt_from("alice", &stale, None).unwrap();
+    bob.core.commit(&decrypted.pending_id, true).unwrap();
+    assert_eq!(sids(&mut bob, "alice").len(), 2, "nothing pruned");
+    assert!(sids(&mut bob, "alice").contains(&fresh));
+}
+
+#[test]
+fn session_start_times_are_recorded_and_rotation_keeps_the_pinned_identity() {
+    let (mut alice, _bob) = established();
+    let started = alice.core.session_info("bob").unwrap().unwrap().1;
+    assert!(started >= protocol::now_ms() - 60_000);
+    let pinned = alice.core.peer("bob").unwrap().unwrap().identity;
+    alice.core.rotate("bob").unwrap();
+    assert_eq!(alice.core.peer("bob").unwrap().unwrap().identity, pinned);
+}
+
+#[test]
+fn the_shorter_non_off_rotation_interval_wins() {
+    use chatcore::core::rotation_interval;
+    let day = 86_400_000;
+    assert_eq!(rotation_interval(day, 7 * day), day);
+    assert_eq!(rotation_interval(0, 30 * day), 30 * day);
+    assert_eq!(rotation_interval(0, 0), 0);
+    assert_eq!(rotation_interval(12_345, 99), 0);
+}
+
+#[test]
+fn resetting_the_identity_drops_sessions_prekeys_and_pending_decrypts_but_keeps_pins() {
+    let (mut alice, mut bob) = established();
+    let old = alice.core.identity().unwrap().public;
+    let message = bob.send("alice", "pending", None).unwrap();
+    let pending = alice.core.decrypt_from("bob", &message, None).unwrap();
+    alice.core.reset_identity().unwrap();
+    assert!(alice.core.commit(&pending.pending_id, false).is_err(), "a decrypt from before the reset cannot be committed");
+    assert!(sids(&mut alice, "bob").is_empty());
+    assert_ne!(alice.core.identity().unwrap().public, old);
+    assert!(alice.core.peer("bob").unwrap().is_some());
 }

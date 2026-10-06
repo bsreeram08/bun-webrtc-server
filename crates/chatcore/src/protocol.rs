@@ -200,6 +200,14 @@ pub struct State {
     #[serde(rename = "oldDhr")]
     pub old_dhr: Vec<String>,
     pub init: Option<Handshake>,
+    /// When this session was opened here (Unix ms); drives scheduled rotation (signal.js `startedAt`).
+    #[serde(default, rename = "startedAt")]
+    pub started_at: Option<u64>,
+}
+
+/// Unix time in milliseconds.
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_millis() as u64)
 }
 
 fn ratchet_step(state: &mut State, remote: &str) -> Result<()> {
@@ -313,6 +321,7 @@ pub fn initiate(identity: &Identity, bundle: &Bundle) -> Result<State> {
         skipped: Vec::new(),
         old_dhr: Vec::new(),
         init: Some(Handshake { ik: identity.public.clone(), ek: b64(&ek.public), spk: bundle.signed_pre_key.id, opk: bundle.one_time_pre_key.as_ref().map(|opk| opk.id) }),
+        started_at: Some(now_ms()),
     })
 }
 
@@ -347,6 +356,7 @@ pub fn respond(identity: &Identity, spk: &SignedPreKey, opk: Option<&DhPair>, he
         skipped: Vec::new(),
         old_dhr: Vec::new(),
         init: None,
+        started_at: Some(now_ms()),
     })
 }
 
