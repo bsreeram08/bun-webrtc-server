@@ -88,6 +88,10 @@
     }
     // One key store per account on this device. Private keys never leave it.
     const store = window.Signal.indexedDbBackend(`webrtc-bun-signal-v1-${user.id}`);
+    // Ask the browser not to evict the keys; and remember that this browser held them, so a browser that
+    // silently drops site data (private tabs, in-app browsers) is named instead of looping on new keys.
+    try { await navigator.storage?.persist?.(); } catch {}
+    try { keysLost = !await store.get('identity') && localStorage.getItem(`keys-held-v1:${user.id}`) === '1'; } catch { keysLost = false; }
     box = window.Signal.box(store, { identityChanged: contactId => identityChanged(contactId) });
     flagged = new Set(await store.get('flagged') || []);
     flagged.store = store;
@@ -97,9 +101,12 @@
   /** One device per account holds messaging. Another device or browser (e.g. Safari vs the Home Screen app)
    *  never replaces it silently: it stays inactive (sends nothing, acknowledges nothing) until the user moves
    *  messaging here, so envelopes meant for the active device are never consumed by one that cannot read them. */
-  let inactive = false;
+  let inactive = false, keysLost = false;
   function setInactive(value) {
     inactive = value; $('device-banner').hidden = !value;
+    say('device-banner-text', keysLost
+      ? 'This browser lost your encryption keys since you last used it here. That happens in private tabs and in apps’ built-in browsers (Instagram, WhatsApp, Telegram…). Open calls.sreerams.in in Safari or Chrome itself, or from the Home Screen app, and use that one.'
+      : 'Encrypted messaging for this account is active on another device or browser. Messages are not sent or received here.');
     if (value) { say('chats-status', ''); if (current) App.chatStatus('Messaging is active on another device. Use this device from the chat list to send here.'); }
   }
   async function publishKeys(takeover = false) {
@@ -108,7 +115,8 @@
     const mine = count.identity, here = keys.identity;
     const other = Boolean(mine && (mine.dh !== here.dh || mine.sign !== here.sign));
     if (other && !takeover) { setInactive(true); return; }
-    setInactive(false);
+    setInactive(false); keysLost = false;
+    try { localStorage.setItem(`keys-held-v1:${me.id}`, '1'); } catch {}
     const upload = { identity: here, signedPreKey: keys.signedPreKey };
     // Taking over replaces the identity, and the server drops the previous device's prekeys with it.
     if (other || count.oneTimePreKeys < 20 || count.signedPreKeyId === null) upload.oneTimePreKeys = await box.oneTimePreKeys(other ? 100 : 100 - Math.min(count.oneTimePreKeys, 100) || 100);
