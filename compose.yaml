@@ -14,9 +14,21 @@ services:
       TURN_SECRET: ${TURN_SECRET:?Missing TURN secret}
       TURN_URLS: turn:${TURN_HOST:?Missing TURN hostname}:3478?transport=udp,turn:${TURN_HOST}:3478?transport=tcp
       DATA_DIR: /data
+      # Optional native apps: identifiers, and push key files placed in deploy/native (mounted read-only).
+      APPLE_APP_IDS: ${APPLE_APP_IDS:-}
+      ANDROID_PACKAGE: ${ANDROID_PACKAGE:-}
+      ANDROID_CERT_SHA256: ${ANDROID_CERT_SHA256:-}
+      ANDROID_APK_KEY_HASHES: ${ANDROID_APK_KEY_HASHES:-}
+      FCM_SERVICE_ACCOUNT_JSON_PATH: ${FCM_SERVICE_ACCOUNT_JSON_PATH:-}
+      APNS_KEY_PATH: ${APNS_KEY_PATH:-}
+      APNS_KEY_ID: ${APNS_KEY_ID:-}
+      APNS_TEAM_ID: ${APNS_TEAM_ID:-}
+      APNS_BUNDLE_ID: ${APNS_BUNDLE_ID:-}
+      APNS_ENV: ${APNS_ENV:-sandbox}
     volumes:
       # Account database: usernames, passkey public keys, contacts and sessions. Never message content.
       - signaling_data:/data
+      - ./deploy/native:/native:ro
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
