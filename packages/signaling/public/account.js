@@ -124,10 +124,19 @@
     if (other) flushOutgoing();
   }
   $('device-takeover').onclick = async () => {
-    $('device-takeover').disabled = true;
-    try { await publishKeys(true); say('chats-status', 'Messaging moved to this device. Your contacts will see that your security code changed.'); }
-    catch (error) { say('chats-status', `Could not move messaging here: ${error.message}`); }
-    finally { $('device-takeover').disabled = false; }
+    $('device-takeover').disabled = true; $('device-takeover').textContent = 'Moving…';
+    let step = 'starting';
+    try {
+      // Each step is named so a failure on a real phone says exactly where it stopped.
+      if (!box) { step = 'opening this browser’s key storage'; await ready; if (!box) throw new Error('encrypted messaging is unavailable in this browser'); }
+      step = 'uploading this device’s keys'; await publishKeys(true);
+      step = 'confirming with the server';
+      const check = await api('/api/keys/count'), here = (await box.prekeys()).identity;
+      if (!check.identity || check.identity.dh !== here.dh || check.identity.sign !== here.sign) throw new Error('the server still lists the other device');
+      say('chats-status', 'Messaging moved to this device. Your contacts will see that your security code changed.');
+    } catch (error) {
+      say('device-banner-text', `Could not move messaging here (${step}): ${error?.message || error}. Reload and try again; if it repeats, send this text to the admin.`);
+    } finally { $('device-takeover').disabled = false; $('device-takeover').textContent = 'Use this device instead'; }
   };
   async function rememberFlag(id) {
     flagged.add(id);
