@@ -264,7 +264,7 @@
     }
     async function sessions(contactId) { return await backend.get(`sessions:${contactId}`) || { active: null, list: {}, order: [] }; }
     function remember(record, state, makeActive) {
-      record = { active: record.active, list: { ...record.list, [state.sid]: state }, order: [...record.order.filter(sid => sid !== state.sid), state.sid] };
+      record = { ...record, list: { ...record.list, [state.sid]: state }, order: [...record.order.filter(sid => sid !== state.sid), state.sid] };
       while (record.order.length > MAX_SESSIONS) delete record.list[record.order.shift()];
       if (makeActive || !record.active || !record.list[record.active]) record.active = state.sid;
       return record;
@@ -279,7 +279,10 @@
           await notePeer(contactId, bundle.identity);
           await assertSendable(contactId);
           record = await sessions(contactId);
-          state = await initiate(await identity(), bundle);
+          state = { ...await initiate(await identity(), bundle), startedAt: Date.now() };
+          // A manual or scheduled rotation: older sessions stay (bounded) so messages already in flight
+          // still decrypt, and are dropped once the peer answers on this new one.
+          if (record.rotating) record = { ...record, rotating: false, rotatedTo: state.sid };
         }
         const result = await encrypt(state, encoder.encode(JSON.stringify(plaintext)));
         await backend.put(`sessions:${contactId}`, remember(record, result.session, true));
@@ -328,7 +331,7 @@
             // A consumed one-time prekey is gone only after a completed claim, so this is a replay.
             if (!opk) throw coded('replay', 'One-time prekey already used');
           }
-          state = await respond(me, spk, opk, parsed.header); fresh = true;
+          state = { ...await respond(me, spk, opk, parsed.header), startedAt: Date.now() }; fresh = true;
         }
         const result = await decrypt(state, parsed); // Authenticate before claiming anything.
         if (fresh) await claim(spk.id, x.ek, contactId);
@@ -336,10 +339,21 @@
         const identityChanged = Boolean(fresh && known && !sameIdentity(known.identity, x.ik));
         let payload;
         try { payload = JSON.parse(decoder.decode(result.plaintext)); } catch { throw coded('invalid', 'Invalid message content'); }
-        await handle(payload, { identityChanged, firstContact: Boolean(fresh && !known), identity: fresh ? { dh: x.ik.dh, sign: x.ik.sign } : null });
+        // handle() may answer { rotate: true } for a peer's session reset; the box applies it below, in the same
+        // write as the ratchet, so no other code mutates this contact's sessions while the queue is held.
+        const outcome = await handle(payload, { identityChanged, firstContact: Boolean(fresh && !known), identity: fresh ? { dh: x.ik.dh, sign: x.ik.sign } : null });
         // Record a new or changed identity only once a message under it authenticated.
         if (fresh) { await notePeer(contactId, x.ik); record = await sessions(contactId); }
-        const writes = [{ put: `sessions:${contactId}`, value: remember(record, result.session, true) }];
+        // A late message on an old session must not undo a rotation in progress. A fresh session from the
+        // peer is itself new keys, so it simply becomes the one in use.
+        const keepRotation = !fresh && (record.rotating || (record.rotatedTo && record.rotatedTo !== parsed.header.sid));
+        let next = remember(fresh ? { ...record, rotating: false, rotatedTo: null } : record, result.session, !keepRotation);
+        // The peer answered on the session we rotated to: the old chains are no longer needed.
+        if (!fresh && record.rotatedTo === parsed.header.sid) next = { ...only(next, parsed.header.sid), rotatedTo: null };
+        // The peer reset the session: keep only the new one it opened. A reset arriving on an older session is
+        // ignored, so it can never make an old chain the survivor.
+        if (outcome?.rotate === true && (fresh || record.rotatedTo === parsed.header.sid)) next = { ...only(next, parsed.header.sid), rotating: false, rotatedTo: null };
+        const writes = [{ put: `sessions:${contactId}`, value: next }];
         if (fresh) {
           writes.push({ put: `claim:${spk.id}:${x.ek}`, value: { contact: contactId, done: true } });
           if (x.opk !== null) writes.push({ delete: `opk:${x.opk}` });
@@ -347,6 +361,34 @@
         // The claim's x3dh lock keeps a concurrent claim for this ek from interleaving with completion.
         await (fresh ? serial('x3dh', () => backend.batch(writes)) : backend.batch(writes));
       });
+    }
+    const only = (record, sid) => ({ active: sid, list: { [sid]: record.list[sid] }, order: [sid] });
+    /** Starts a fresh session (new X3DH) with the next message; older sessions stay until the peer answers. */
+    function rotate(contactId) {
+      return serial(`contact:${contactId}`, async () => {
+        const record = await sessions(contactId);
+        await backend.put(`sessions:${contactId}`, { ...record, active: null, rotating: true, rotatedTo: null });
+      });
+    }
+    /** When the active session started; sessions from before this was recorded count from first use here. */
+    function sessionInfo(contactId) {
+      return serial(`contact:${contactId}`, async () => {
+        const record = await sessions(contactId), state = record.active && record.list[record.active];
+        if (!state) return null;
+        if (!state.startedAt) await backend.put(`sessions:${contactId}`, { ...record, list: { ...record.list, [state.sid]: { ...state, startedAt: Date.now() } } });
+        return { sid: state.sid, startedAt: state.startedAt || Date.now() };
+      });
+    }
+    /**
+     * A new identity for this device: every session, prekey and replay record goes with the old one.
+     * Pinned contact identities (peer:*) stay. Explicit only — contacts see a security-code change, and
+     * changing it on a timer would teach people to ignore those warnings.
+     */
+    function resetIdentity() {
+      return serial('prekeys', () => serial('x3dh', async () => {
+        for (const prefix of ['sessions:', 'opk:', 'claim:', 'claims:']) await backend.deletePrefix(prefix);
+        await backend.batch([{ delete: 'identity' }, { delete: 'spk' }, { delete: 'opk-next' }]);
+      }));
     }
     async function safety(myUsername, contactId, theirUsername) {
       const me = await identity(), peer = await backend.get(`peer:${contactId}`);
@@ -362,7 +404,7 @@
       const peer = await backend.get(`peer:${contactId}`);
       if (peer) await backend.put(`peer:${contactId}`, { ...peer, changed: false, blocked: false });
     }
-    return { identity, prekeys, oneTimePreKeys, encryptTo, decryptFrom, notePeer, safety, setVerified, acceptChange, peer: contactId => backend.get(`peer:${contactId}`), forget: contactId => backend.delete(`sessions:${contactId}`) };
+    return { identity, prekeys, oneTimePreKeys, encryptTo, decryptFrom, notePeer, safety, setVerified, acceptChange, rotate, sessionInfo, resetIdentity, peer: contactId => backend.get(`peer:${contactId}`), forget: contactId => backend.delete(`sessions:${contactId}`) };
   }
 
   // IndexedDB backend: CryptoKeys are stored by structured clone and never exported.
@@ -391,6 +433,12 @@
     };
   }
 
-  const api = { MAX_CLAIMS_PER_CONTACT, supported, generateIdentity, generateSignedPreKey, verifySignedPreKey, initiate, respond, encrypt, decrypt, parseEnvelope, safetyNumber, box, indexedDbBackend, b64, unb64, MAX_SKIP };
+  // Chat key rotation schedule: each side picks one; a conversation uses the shorter non-off interval.
+  const DAY = 86400000, ROTATION_CHOICES = Object.freeze([0, DAY, 7 * DAY, 30 * DAY]);
+  function rotationInterval(mine, theirs) {
+    const set = [mine, theirs].filter(value => ROTATION_CHOICES.includes(value) && value > 0);
+    return set.length ? Math.min(...set) : 0;
+  }
+  const api = { ROTATION_CHOICES, rotationInterval, MAX_CLAIMS_PER_CONTACT, supported, generateIdentity, generateSignedPreKey, verifySignedPreKey, initiate, respond, encrypt, decrypt, parseEnvelope, safetyNumber, box, indexedDbBackend, b64, unb64, MAX_SKIP };
   (typeof window !== 'undefined' ? window : globalThis).Signal = Object.freeze(api);
 })();

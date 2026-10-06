@@ -7,8 +7,8 @@ const source = readFileSync(new URL('../../packages/signaling/public/chat-store.
 const PASSWORD = 'correct horse battery staple';
 const NOW = 1800000000000;
 const ROOM = 'r'.repeat(43);
-type Message = { id: string; conversationId: string; direction: 'incoming' | 'outgoing'; text: string; createdAt: number; status: 'queued' | 'sent' | 'delivered' | 'uncertain'; expiresAt: number | null };
-type Store = { receive(conversationId: string, payload: unknown): Promise<string>; inboundDisposition(error: any, attempts: number): { ack: boolean; notice: string | null }; put(message: unknown): Promise<Message>; list(): Promise<Message[]>; clear(): Promise<void>; removeConversation(conversationId: string): Promise<void>; setStatus(conversationId: string, id: string, status: string): Promise<boolean>; exportBackup(password: string): Promise<Blob>; importBackup(file: Blob, password: string): Promise<number> };
+type Message = { id: string; conversationId: string; direction: 'incoming' | 'outgoing' | 'system'; text: string; createdAt: number; status: 'queued' | 'sent' | 'delivered' | 'uncertain'; expiresAt: number | null };
+type Store = { receive(conversationId: string, payload: unknown): Promise<string>; note(conversationId: string, id: string, text: string): Promise<boolean>; checkPayload(payload: unknown): string; inboundDisposition(error: any, attempts: number): { ack: boolean; notice: string | null }; put(message: unknown): Promise<Message>; list(): Promise<Message[]>; clear(): Promise<void>; removeConversation(conversationId: string): Promise<void>; setStatus(conversationId: string, id: string, status: string): Promise<boolean>; exportBackup(password: string): Promise<Blob>; importBackup(file: Blob, password: string): Promise<number> };
 function fixture() {
   let now = NOW;
   class Clock extends Date { static override now() { return now; } }
@@ -238,5 +238,59 @@ describe('incoming mailbox messages', () => {
       expect(store.inboundDisposition(error, 2)).toEqual({ ack: false, notice: 'retrying' });
       expect(store.inboundDisposition(error, 3)).toEqual({ ack: true, notice: 'gave-up' });
     }
+  });
+});
+
+describe('control payloads and key rotation', () => {
+  const id = () => crypto.randomUUID();
+  test('rotate and policy payloads have an exact shape; anything else is invalid', () => {
+    const { store } = fixture();
+    expect(store.checkPayload({ v: 1, type: 'rotate', id: id(), reason: 'manual' })).toBe('rotate');
+    expect(store.checkPayload({ v: 1, type: 'rotate', id: id(), reason: 'scheduled' })).toBe('rotate');
+    expect(store.checkPayload({ v: 1, type: 'policy', id: id(), rotateEveryMs: 86400000 })).toBe('policy');
+    expect(store.checkPayload({ v: 1, type: 'policy', id: id(), rotateEveryMs: 0 })).toBe('policy');
+    expect(store.checkPayload({ v: 1, type: 'burn', id: id() })).toBe('burn');
+    for (const bad of [
+      { v: 1, type: 'rotate', id: id(), reason: 'because' }, { v: 1, type: 'rotate', id: id() }, { v: 1, type: 'rotate', id: id(), reason: 'manual', extra: 1 },
+      { v: 1, type: 'policy', id: id(), rotateEveryMs: -1 }, { v: 1, type: 'policy', id: id(), rotateEveryMs: 1.5 }, { v: 1, type: 'policy', id: id(), rotateEveryMs: '86400000' },
+      { v: 2, type: 'rotate', id: id(), reason: 'manual' }, { v: 1, type: 'rotate', id: 'nope', reason: 'manual' }, { v: 1, type: 'unknown', id: id() }, null, [],
+    ]) expect(() => store.checkPayload(bad)).toThrow(expect.objectContaining({ code: 'invalid' }));
+  });
+  test('system lines never come from outside: put and backup import reject them, and backups leave them out', async () => {
+    const { store } = fixture();
+    await expect(store.put({ ...message(), direction: 'system', status: 'delivered' })).rejects.toThrow();
+    await store.put(message({ text: 'kept' }));
+    await store.note(ROOM, id(), '🔄 Secure session reset by you');
+    const backup = await store.exportBackup('correct horse battery staple');
+    const restored = fixture();
+    expect(await restored.store.importBackup(backup, 'correct horse battery staple')).toBe(1);
+    expect((await restored.store.list()).map(record => record.direction)).toEqual(['outgoing']);
+  });
+  test('a contact cannot flood system lines: they coalesce within a minute and count toward the caps', async () => {
+    const { store, advance } = fixture();
+    for (let index = 0; index < 50; index++) await store.note(ROOM, id(), `🔄 Secure session reset by mallory ${index}`);
+    let rows = (await store.list()).filter(record => record.direction === 'system');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.text).toBe('🔄 Secure session reset by mallory 49');
+    advance(61000);
+    await store.note(ROOM, id(), '🔄 later');
+    rows = (await store.list()).filter(record => record.direction === 'system');
+    expect(rows).toHaveLength(2);
+    // System lines share the 500-per-conversation allowance with the contact's messages.
+    const full = fixture();
+    for (let index = 0; index < 499; index++) expect(await full.store.receive(ROOM, { v: 1, type: 'message', id: id(), text: 'x', createdAt: NOW, expiresAt: null })).toBe('stored');
+    expect(await full.store.note(ROOM, id(), '🔄 reset')).toBe(true);
+    full.advance(61000);
+    await expect(full.store.note(ROOM, id(), '🔄 reset again')).rejects.toMatchObject({ code: 'conversation-full' });
+  });
+  test('system lines are stored once per id, never as messages to send, and are removed with the conversation', async () => {
+    const { store } = fixture(), line = id();
+    expect(await store.note(ROOM, line, '🔄 Secure session reset by you')).toBe(true);
+    expect(await store.note(ROOM, line, '🔄 Secure session reset by you')).toBe(false);
+    const records = await store.list();
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ direction: 'system', status: 'delivered', expiresAt: null });
+    await store.removeConversation(ROOM);
+    expect(await store.list()).toHaveLength(0);
   });
 });

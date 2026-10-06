@@ -13,10 +13,12 @@
     return value && typeof value === 'object' && !Array.isArray(value) &&
       Object.keys(value).length === fields.length && fields.every(key => Object.hasOwn(value, key));
   }
-  function validate(message) {
+  // 'system' rows (local notices such as a session reset) exist only on this device: only note() writes them
+  // and stored records are read back with them allowed; put() and backup import never accept them.
+  function validate(message, allowSystem = false) {
     if (!exactObject(message, FIELDS) || typeof message.id !== 'string' || !UUID.test(message.id) ||
         typeof message.conversationId !== 'string' || !ROOM.test(message.conversationId) ||
-        !['incoming', 'outgoing'].includes(message.direction) || typeof message.text !== 'string' ||
+        !(['incoming', 'outgoing'].includes(message.direction) || allowSystem && message.direction === 'system') || typeof message.text !== 'string' ||
         message.text.length === 0 || encoder.encode(message.text).byteLength > 4096 ||
         !Number.isSafeInteger(message.createdAt) || message.createdAt < 0 || message.createdAt > 8640000000000000 ||
         !['queued', 'sent', 'delivered', 'uncertain'].includes(message.status) ||
@@ -64,7 +66,7 @@
         try {
           const active = new Map(), now = Date.now();
           for (const value of request.result) {
-            const message = validate(value);
+            const message = validate(value, true);
             if (expired(message, now)) store.delete([message.conversationId, message.id]);
             else active.set(key(message), message);
           }
@@ -116,12 +118,49 @@
         if (FIELDS.some(field => field !== 'status' && previous[field] !== message[field])) throw coded('conflict', 'A message identifier was reused with different content.');
         return { result: 'duplicate' };
       }
-      let fromConversation = 0;
-      for (const value of active.values()) if (value.conversationId === conversationId && value.direction === 'incoming') fromConversation++;
-      if (fromConversation >= MAX_PER_CONVERSATION) throw coded('conversation-full', 'This conversation holds 500 incoming messages.');
+      if (fromPeer(active, conversationId) >= MAX_PER_CONVERSATION) throw coded('conversation-full', 'This conversation holds 500 incoming messages.');
       if (active.size >= MAX_MESSAGES) throw coded('full', 'This device holds 2,000 messages. Clear chat history to receive more.');
       return { writes: [message], result: 'stored' };
     });
+  }
+  /**
+   * Shape of a decrypted contact payload; message content itself is validated by receive().
+   * 'rotate' asks the peer to drop old sessions; 'policy' carries the sender's rotation interval in ms
+   * (only known choices take effect, see Signal.rotationInterval). Returns the payload type.
+   */
+  function checkPayload(payload) {
+    const bad = () => coded('invalid', 'Invalid message');
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload) || payload.v !== 1 || typeof payload.id !== 'string' || !UUID.test(payload.id)) throw bad();
+    const size = Object.keys(payload).length;
+    switch (payload.type) {
+      case 'receipt': case 'burn': if (size === 3) return payload.type; break;
+      case 'message': if (size === 6) return payload.type; break;
+      case 'rotate': if (size === 4 && ['manual', 'scheduled'].includes(payload.reason)) return payload.type; break;
+      case 'policy': if (size === 4 && Number.isSafeInteger(payload.rotateEveryMs) && payload.rotateEveryMs >= 0) return payload.type; break;
+    }
+    throw bad();
+  }
+  /**
+   * A local, never-sent system line (e.g. "secure session reset"), stored once per id. Peer-triggered lines
+   * count toward the same caps as incoming messages, and one written within a minute of the previous
+   * system line in that conversation replaces it instead of adding a row, so a contact cannot flood them.
+   */
+  async function note(conversationId, id, text) {
+    const message = validate({ id, conversationId, direction: 'system', text, createdAt: Date.now(), status: 'delivered', expiresAt: null }, true);
+    return transaction((active, now) => {
+      if (active.has(key(message))) return { result: false };
+      const recent = [...active.values()].filter(value => value.conversationId === conversationId && value.direction === 'system' && now - value.createdAt < 60000).at(-1);
+      if (recent) return { writes: [{ ...recent, text: message.text, createdAt: Math.max(recent.createdAt, message.createdAt) }], result: false };
+      if (fromPeer(active, conversationId) >= MAX_PER_CONVERSATION) throw coded('conversation-full', 'This conversation holds 500 incoming messages.');
+      if (active.size >= MAX_MESSAGES) throw coded('full', 'This device holds 2,000 messages. Clear chat history to receive more.');
+      return { writes: [message], result: true };
+    });
+  }
+  /** Rows a contact can cause on this device: their messages and the system lines their payloads add. */
+  function fromPeer(active, conversationId) {
+    let count = 0;
+    for (const value of active.values()) if (value.conversationId === conversationId && value.direction !== 'outgoing') count++;
+    return count;
   }
   /**
    * What to do with a mailbox envelope after trying to process it: acknowledge (the server deletes it)
@@ -198,7 +237,7 @@
     passwordBytes(password);
     const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
     const encryptionKey = await derive(password, salt);
-    const messages = await list();
+    const messages = (await list()).filter(message => message.direction !== 'system'); // Local notices stay local.
     const plaintext = encoder.encode(JSON.stringify({ version: 1, messages }));
     const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad, tagLength: 128 }, encryptionKey, plaintext));
     const envelope = { format: FORMAT, version: 1, kdf: 'PBKDF2-SHA256', iterations: ITERATIONS, cipher: 'AES-256-GCM', salt: base64(salt), iv: base64(iv), ciphertext: base64(ciphertext) };
@@ -229,7 +268,7 @@
       throw new Error('Backup must contain at most 2,000 valid messages. Nothing was imported.');
     }
     // Validate every record before opening the write transaction, including expired records.
-    const incoming = payload.messages.map(validate);
+    const incoming = payload.messages.map(message => validate(message)); // Never system rows.
     return transaction((active, now) => {
       const writes = new Map(); let count = 0;
       for (const message of incoming) {
@@ -246,5 +285,5 @@
       return { writes: [...writes.values()], result: count };
     });
   }
-  window.ChatStore = Object.freeze({ put, list, clear, removeConversation, setStatus, exportBackup, importBackup, receive, inboundDisposition, isMessageId: id => typeof id === 'string' && UUID.test(id) });
+  window.ChatStore = Object.freeze({ put, list, clear, removeConversation, setStatus, exportBackup, importBackup, receive, note, checkPayload, inboundDisposition, isMessageId: id => typeof id === 'string' && UUID.test(id) });
 })();

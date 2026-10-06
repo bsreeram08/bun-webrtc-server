@@ -355,3 +355,79 @@ describe('persistent box', () => {
         expect((await A.peer('bob')).identity).toEqual(B && (await B.identity()).pub);
     });
 });
+
+describe('key rotation', () => {
+    async function people() {
+        const alice = memory(), bob = memory();
+        const A = Signal.box(alice), B = Signal.box(bob);
+        const bundleOf = async (box: any) => { const keys = await box.prekeys(); return { identity: keys.identity, signedPreKey: keys.signedPreKey, oneTimePreKey: (await box.oneTimePreKeys(1))[0] }; };
+        const deliver = async (to: any, from: string, envelope: string) => { const got: any[] = []; await to.decryptFrom(from, envelope, async (message: any) => { got.push(message); }); return got[0]; };
+        return { alice, bob, A, B, bundleOf, deliver };
+    }
+    const sids = (store: any, contact: string) => store.map.get(`sessions:${contact}`)?.order ?? [];
+    test('the shorter non-off interval wins; off on both sides means no rotation', () => {
+        const day = 86400000;
+        expect(Signal.rotationInterval(day, 7 * day)).toBe(day);
+        expect(Signal.rotationInterval(0, 30 * day)).toBe(30 * day);
+        expect(Signal.rotationInterval(7 * day, 0)).toBe(7 * day);
+        expect(Signal.rotationInterval(0, 0)).toBe(0);
+        expect(Signal.rotationInterval(12345, 99)).toBe(0); // Unknown values are ignored, never trusted.
+    });
+    test('rotation opens a fresh X3DH session; in-flight messages on the old one still decrypt, then old chains are dropped', async () => {
+        const { alice, bob, A, B, bundleOf, deliver } = await people();
+        expect(await deliver(B, 'alice', await A.encryptTo('bob', { n: 1 }, () => bundleOf(B)))).toEqual({ n: 1 });
+        expect(await deliver(A, 'bob', await B.encryptTo('alice', { n: 2 }, () => bundleOf(A)))).toEqual({ n: 2 });
+        const old = (await A.sessionInfo('bob')).sid;
+        const inFlightFromBob = await B.encryptTo('alice', { n: 3 }, () => bundleOf(A)); // Sent on the old session.
+        await A.rotate('bob');
+        const rotation = await A.encryptTo('bob', { type: 'rotate' }, () => bundleOf(B));
+        const fresh = (await A.sessionInfo('bob')).sid;
+        expect(fresh).not.toBe(old);
+        expect(JSON.parse(atob(rotation.replace(/-/g, '+').replace(/_/g, '/'))).x).toBeTruthy(); // A new X3DH handshake.
+        // Bob's message from before the rotation arrives late: it decrypts, and does not undo the rotation.
+        expect(await deliver(A, 'bob', inFlightFromBob)).toEqual({ n: 3 });
+        expect((await A.sessionInfo('bob')).sid).toBe(fresh);
+        // Bob takes the new session and drops his old chain keys, in the same write as the ratchet.
+        const got: any[] = [];
+        await B.decryptFrom('alice', rotation, async (message: any) => { got.push(message); return { rotate: true }; });
+        expect(got).toEqual([{ type: 'rotate' }]);
+        expect(sids(bob, 'alice')).toEqual([fresh]);
+        // Bob answers on the new session, so alice drops hers too.
+        expect(await deliver(A, 'bob', await B.encryptTo('alice', { n: 4 }, () => bundleOf(A)))).toEqual({ n: 4 });
+        expect(sids(alice, 'bob')).toEqual([fresh]);
+        // A message on the dropped old session can no longer be decrypted.
+        await expect(deliver(A, 'bob', inFlightFromBob)).rejects.toMatchObject({ code: 'unknown-session' });
+    });
+    test('a reset arriving on an old session is ignored and never makes an old chain the survivor', async () => {
+        const { bob, A, B, bundleOf, deliver } = await people();
+        await deliver(B, 'alice', await A.encryptTo('bob', { n: 1 }, () => bundleOf(B)));
+        await deliver(A, 'bob', await B.encryptTo('alice', { n: 2 }, () => bundleOf(A)));
+        const stale = await A.encryptTo('bob', { type: 'rotate' }, () => bundleOf(B)); // On the old session.
+        await A.rotate('bob');
+        await deliver(B, 'alice', await A.encryptTo('bob', { n: 3 }, () => bundleOf(B))); // Opens the new session.
+        const fresh = (await B.sessionInfo('alice')).sid;
+        expect(sids(bob, 'alice')).toHaveLength(2);
+        await B.decryptFrom('alice', stale, async () => ({ rotate: true }));
+        expect(sids(bob, 'alice')).toHaveLength(2); // Nothing pruned.
+        expect(sids(bob, 'alice')).toContain(fresh);
+    });
+    test('session start times are recorded, and rotation never touches the pinned identity', async () => {
+        const { A, B, bundleOf, deliver } = await people();
+        const before = Date.now();
+        await deliver(B, 'alice', await A.encryptTo('bob', { n: 1 }, () => bundleOf(B)));
+        expect((await A.sessionInfo('bob')).startedAt).toBeGreaterThanOrEqual(before);
+        expect((await B.sessionInfo('alice')).startedAt).toBeGreaterThanOrEqual(before);
+        const pinned = await A.peer('bob');
+        await A.rotate('bob'); await A.encryptTo('bob', { n: 2 }, () => bundleOf(B));
+        expect(await A.peer('bob')).toEqual(pinned);
+    });
+    test('a new identity for this device drops sessions and prekeys but keeps pinned contacts', async () => {
+        const { alice, A, B, bundleOf, deliver } = await people();
+        await deliver(B, 'alice', await A.encryptTo('bob', { n: 1 }, () => bundleOf(B)));
+        const old = (await A.identity()).pub;
+        await A.resetIdentity();
+        expect((await A.identity()).pub).not.toEqual(old);
+        expect([...alice.map.keys()].some(key => key.startsWith('sessions:'))).toBe(false);
+        expect(alice.map.get('peer:bob')).toBeTruthy();
+    });
+});
