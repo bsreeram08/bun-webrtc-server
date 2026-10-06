@@ -94,8 +94,11 @@ describe('invites and passkey registration', () => {
     test('state changes require this origin', async () => {
         const response = await api('/api/register/options', { method: 'POST', body: '{}', headers: { Origin: 'https://evil.example' } });
         expect(response.status).toBe(403);
+        // Without an Origin only a native app naming its platform may start signing in.
         const missing = await fetch(new URL('/api/login/options', app.server.url), { method: 'POST' });
-        expect(missing.status).toBe(403);
+        expect(missing.status).toBe(400);
+        expect(((await missing.json()) as any).flowId).toBeUndefined();
+        expect((await fetch(new URL('/api/contacts', app.server.url), { method: 'POST', body: '{}' })).status).toBe(403);
     });
     test('usernameless sign-in options reveal no accounts and unknown credentials fail generically', async () => {
         user('alice');

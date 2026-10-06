@@ -11,6 +11,11 @@ import type { Push } from './push';
 // Accounts identify people and introduce them; message content never reaches this module.
 // The server learns usernames, the contact graph, presence and passkey public keys.
 export type User = { id: string; username: string };
+export type SessionUser = User & { session: string; client: string };
+/** Native apps name their platform when signing in; browsers never do. */
+export const NATIVE_CLIENTS = new Set(['ios', 'android', 'macos', 'windows', 'linux']);
+/** Oldest app versions the server still supports; apps below these show "update required". */
+export const MIN_CLIENT = { ios: '1.0.0', android: '1.0.0', macos: '1.0.0', windows: '1.0.0', linux: '1.0.0' };
 export type EventsConnection = { kind: 'events'; userId: string; session: string; allow: () => boolean; sent: Set<string> };
 export type Calls = {
     /** Opens (or for calls, replaces) the pair's room and issues fresh participant credentials. */
@@ -26,7 +31,8 @@ export type Calls = {
 const MAILBOX_TTL = 30 * 86400000, MAILBOX_MAX_COUNT = 1000, MAILBOX_MAX_BYTES = 50 * 1024 * 1024, SENDER_MAX_COUNT = 200, SENDER_MAX_BYTES = 10 * 1024 * 1024, ENVELOPE_MAX = 65536, MAX_PREKEYS = 200, INFLIGHT = 32;
 const KEY = /^[A-Za-z0-9_-]{43}$/, SIGNATURE = /^[A-Za-z0-9_-]{86}$/, MESSAGE_ID = /^[A-Za-z0-9_-]{22}$/, RESERVED = new Set(['count']);
 const DAY = 86400000, INVITE_LIFETIME = 7 * DAY, SESSION_LIFETIME = 30 * DAY, FLOW_LIFETIME = 5 * 60000, REQUEST_LIFETIME = 30 * DAY, MAX_PENDING_REQUESTS = 20;
-const USERNAME = /^[a-z0-9_]{3,20}$/, INVITE = /^[A-Za-z0-9_-]{22}$/, FLOW = /^[A-Za-z0-9_-]{22}$/;
+const USERNAME = /^[a-z0-9_]{3,20}$/, INVITE = /^[A-Za-z0-9_-]{22}$/, FLOW = /^[A-Za-z0-9_-]{22}$/, TOKEN = /^[A-Za-z0-9_-]{43}$/;
+const NATIVE_AUTH = /^\/api\/(register|login)\/(options|verify)$/;
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const random = (bytes: number) => randomBytes(bytes).toString('base64url');
 const headers = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' };
@@ -59,6 +65,8 @@ export function openDatabase(dataDir: string) {
         CREATE INDEX IF NOT EXISTS mailbox_age ON mailbox (created_at);
         CREATE TABLE IF NOT EXISTS contact_requests (user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, username TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (user_id, username));
     `);
+    // Which client a session belongs to: 'web' sessions live in a cookie, native ones in a bearer token.
+    if (!db.query<{ name: string }, []>('PRAGMA table_info(sessions)').all().some(column => column.name === 'client')) db.exec("ALTER TABLE sessions ADD COLUMN client TEXT NOT NULL DEFAULT 'web'");
     return db;
 }
 
@@ -69,7 +77,7 @@ export function createInvite(db: Database, createdBy: string | null, now = Date.
     return { code, expiresAt: now + INVITE_LIFETIME };
 }
 
-export function createAccounts(options: { db: Database; origin: string; now: () => number; calls: Calls; push?: Push; ringAckMs?: number }) {
+export function createAccounts(options: { db: Database; origin: string; now: () => number; calls: Calls; push?: Push; ringAckMs?: number; androidOrigins?: string[] }) {
     const { db, now, calls, push } = options;
     // Calls announced by push, so an unanswered one can become a missed-call notification.
     const pushedCalls = new Map<string, { callee: string; from: string; kind: 'voice' | 'video' }>();
@@ -77,10 +85,14 @@ export function createAccounts(options: { db: Database; origin: string; now: () 
     const ringAcks = new Map<string, ReturnType<typeof setTimeout>>();
     const origin = new URL(options.origin), rpID = origin.hostname, secure = origin.protocol === 'https:';
     const cookieName = secure ? '__Host-session' : 'session';
-    const flows = new Map<string, { kind: 'register' | 'login'; challenge: string; expiresAt: number; source: string; invite?: string; username?: string; userId?: string }>();
+    const flows = new Map<string, { kind: 'register' | 'login'; challenge: string; expiresAt: number; source: string; client: string; invite?: string; username?: string; userId?: string }>();
+    // Passkeys made in the Android app sign the app's key hash as their origin; iOS apps sign the web origin.
+    const expectedOrigins = (client: string) => client === 'web' ? options.origin : [options.origin, ...(options.androidOrigins ?? [])];
     const listeners = new Map<string, Set<ServerWebSocket<EventsConnection>>>();
     const allowAuth = requestLimiter({ perSource: 10, global: 100 });
     const allowSend = requestLimiter({ perSource: 20, global: 2000 }), allowBundle = requestLimiter({ perSource: 3, global: 500 });
+    // Each registration pushes a nonce to the claimed device, so one account may not trigger many per second.
+    const allowRegister = requestLimiter({ perSource: 5, global: 200 });
 
     const userByName = (username: string) => db.query<User, [string]>('SELECT id, username FROM users WHERE username = ?').get(username);
     const inviteUsable = (code: string) => Boolean(db.query('SELECT 1 FROM invites WHERE code_hash = ? AND used_by IS NULL AND expires_at > ?').get(hash(code), now()));
@@ -94,10 +106,21 @@ export function createAccounts(options: { db: Database; origin: string; now: () 
     function announce(userId: string) {
         for (const contact of mutualIds(userId)) notify(contact, { type: 'presence', id: userId, online: online(userId) });
     }
-    function startSession(userId: string) {
-        const token = random(32);
-        db.query('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)').run(hash(token), userId, now() + SESSION_LIFETIME);
-        return `${cookieName}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_LIFETIME / 1000}${secure ? '; Secure' : ''}`;
+    /** A fresh session token; only its hash is stored. Web sessions become a cookie, native ones a bearer token. */
+    function startSession(userId: string, client = 'web') {
+        const token = random(32), expiresAt = now() + SESSION_LIFETIME;
+        db.query('INSERT INTO sessions (token_hash, user_id, expires_at, client) VALUES (?, ?, ?, ?)').run(hash(token), userId, expiresAt, client);
+        return { token, expiresAt };
+    }
+    const sessionCookie = (token: string) => `${cookieName}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_LIFETIME / 1000}${secure ? '; Secure' : ''}`;
+    /** Native sign-in answers with a bearer token in the body; browsers get an HttpOnly cookie. */
+    function signedIn(user: User, client: string, status: number) {
+        const session = startSession(user.id, client);
+        return client === 'web' ? json({ user }, status, { 'Set-Cookie': sessionCookie(session.token) }) : json({ user, session }, status);
+    }
+    function bearerToken(request: Request) {
+        const value = request.headers.get('authorization');
+        return value?.startsWith('Bearer ') ? value.slice(7) : undefined;
     }
     function cookieToken(request: Request) {
         for (const part of (request.headers.get('cookie') ?? '').split(';')) {
@@ -105,12 +128,20 @@ export function createAccounts(options: { db: Database; origin: string; now: () 
             if (index > 0 && part.slice(0, index).trim() === cookieName) return part.slice(index + 1).trim();
         }
     }
-    function sessionUser(request: Request): (User & { session: string }) | null {
-        const token = cookieToken(request);
-        if (!token || !/^[A-Za-z0-9_-]{43}$/.test(token)) return null;
+    /**
+     * Cookie sessions belong to the web app and bearer sessions to native apps; neither works as the other.
+     * A bearer request carrying an Origin header came from a browser, so it is refused: a stolen native
+     * token cannot be replayed from a web page, and a page can never authenticate without the cookie.
+     */
+    function sessionUser(request: Request): SessionUser | null {
+        const bearer = bearerToken(request);
+        if (bearer !== undefined && request.headers.get('origin') !== null) return null;
+        const token = bearer ?? cookieToken(request);
+        if (!token || !TOKEN.test(token)) return null;
         const session = hash(token);
-        const user = db.query<User, [string, number]>('SELECT u.id, u.username FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ?').get(session, now());
-        return user && { ...user, session };
+        const row = db.query<User & { client: string }, [string, number]>('SELECT u.id, u.username, s.client FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ?').get(session, now());
+        if (!row || (bearer !== undefined) !== (row.client !== 'web')) return null;
+        return { id: row.id, username: row.username, session, client: row.client };
     }
     const sessionLive = (session: string) => Boolean(db.query('SELECT 1 FROM sessions WHERE token_hash = ? AND expires_at > ?').get(session, now()));
     /** Closes event streams whose session ended (sign-out, expiry or sign-out everywhere). */
@@ -210,24 +241,33 @@ export function createAccounts(options: { db: Database; origin: string; now: () 
         ringAcks.set(roomId, setTimeout(wake, options.ringAckMs ?? 4000));
     }
     async function handle(request: Request, url: URL, server: { upgrade(request: Request, options: { data: EventsConnection }): boolean }, source: string): Promise<Response | undefined> {
-        const requestOrigin = request.headers.get('origin');
+        const requestOrigin = request.headers.get('origin'), bearer = bearerToken(request) !== undefined;
+        // Browsers always send Origin on these requests; bearer tokens are for native apps only.
+        if (bearer && requestOrigin !== null) return json({ error: 'Bearer tokens are only accepted from native apps.' }, 403);
+        if (url.pathname === '/api/version' && request.method === 'GET') return json({ api: 1, minClient: MIN_CLIENT });
         if (url.pathname === '/api/events' && request.method === 'GET') {
-            if (requestOrigin !== options.origin) return json({ error: 'Origin required' }, 403);
+            if (!bearer && requestOrigin !== options.origin) return json({ error: 'Origin required' }, 403);
             const user = sessionUser(request);
             if (!user) return json({ error: 'Unauthorized' }, 401);
             if ((listeners.get(user.id)?.size ?? 0) >= 8) return json({ error: 'Too many connections' }, 429);
             if (server.upgrade(request, { data: { kind: 'events', userId: user.id, session: user.session, allow: packetBudget(200), sent: new Set() } })) return undefined;
             return json({ error: 'WebSocket upgrade required' }, 400);
         }
-        // Every state change must come from this app's own origin (CSRF defence beside SameSite).
-        if (request.method !== 'GET' && requestOrigin !== options.origin) return json({ error: 'Origin required' }, 403);
         const path = url.pathname;
+        // Every state change must come from this app's own origin (CSRF defence beside SameSite), or from a
+        // native app: no Origin header and either a bearer token or a native sign-in naming its platform.
+        const native = requestOrigin === null && (bearer || NATIVE_AUTH.test(path));
+        if (request.method !== 'GET' && requestOrigin !== options.origin && !native) return json({ error: 'Origin required' }, 403);
+        /** 'web' for browsers; the platform a native app names, or null when it names none. */
+        const clientOf = (body: Record<string, any> | null) => requestOrigin !== null ? 'web' : NATIVE_CLIENTS.has(body?.client) ? body!.client as string : null;
         if (/^\/api\/(register|login)\//.test(path) && !allowAuth(source)) return json({ error: 'Rate limited' }, 429);
 
         if (path === '/api/register/options' && request.method === 'POST') {
             const body = await readBody(request);
             const username = typeof body?.username === 'string' ? body.username.trim().toLowerCase() : '';
             const invite = typeof body?.invite === 'string' ? body.invite.trim() : '';
+            const client = clientOf(body);
+            if (!client) return json({ error: 'Native apps must name their platform.' }, 400);
             if (!USERNAME.test(username) || RESERVED.has(username)) return json({ error: 'Usernames are 3–20 lowercase letters, digits or _.' }, 400);
             if (!INVITE.test(invite) || !inviteUsable(invite)) return json({ error: 'This invite code is invalid, expired or already used.' }, 400);
             if (userByName(username)) return json({ error: 'That username is taken.' }, 409);
@@ -236,16 +276,17 @@ export function createAccounts(options: { db: Database; origin: string; now: () 
                 rpName: 'Private conversations', rpID, userName: username, userID: new TextEncoder().encode(userId), attestationType: 'none',
                 authenticatorSelection: { residentKey: 'required', userVerification: 'preferred' },
             });
-            const flowId = addFlow({ kind: 'register', challenge: registration.challenge, source, invite, username, userId });
+            const flowId = addFlow({ kind: 'register', challenge: registration.challenge, source, client, invite, username, userId });
             return flowId ? json({ flowId, options: registration }) : json({ error: 'Busy, try again' }, 503);
         }
         if (path === '/api/register/verify' && request.method === 'POST') {
             const body = await readBody(request);
             const flow = takeFlow(body?.flowId, 'register');
-            if (!flow) return json({ error: 'Registration expired. Start again.' }, 400);
+            // A ceremony finishes on the kind of client that started it.
+            if (!flow || (flow.client === 'web') !== (requestOrigin !== null)) return json({ error: 'Registration expired. Start again.' }, 400);
             let credential;
             try {
-                const result = await verifyRegistrationResponse({ response: body!.response, expectedChallenge: flow.challenge, expectedOrigin: options.origin, expectedRPID: rpID, requireUserVerification: false });
+                const result = await verifyRegistrationResponse({ response: body!.response, expectedChallenge: flow.challenge, expectedOrigin: expectedOrigins(flow.client), expectedRPID: rpID, requireUserVerification: false });
                 if (!result.verified) throw new Error('unverified');
                 credential = result.registrationInfo.credential;
             } catch { return json({ error: 'Passkey could not be verified.' }, 400); }
@@ -260,12 +301,14 @@ export function createAccounts(options: { db: Database; origin: string; now: () 
             } catch (error: any) {
                 return json({ error: error?.message === 'invite' ? 'This invite code is invalid, expired or already used.' : 'That username is taken.' }, 409);
             }
-            return json({ user: { id: flow.userId, username: flow.username } }, 201, { 'Set-Cookie': startSession(flow.userId!) });
+            return signedIn({ id: flow.userId!, username: flow.username! }, flow.client, 201);
         }
         if (path === '/api/login/options' && request.method === 'POST') {
+            const client = clientOf(await readBody(request));
+            if (!client) return json({ error: 'Native apps must name their platform.' }, 400);
             // Usernameless: discoverable credentials, so the server never reveals which accounts exist.
             const authentication = await generateAuthenticationOptions({ rpID, userVerification: 'preferred' });
-            const flowId = addFlow({ kind: 'login', challenge: authentication.challenge, source });
+            const flowId = addFlow({ kind: 'login', challenge: authentication.challenge, source, client });
             return flowId ? json({ flowId, options: authentication }) : json({ error: 'Busy, try again' }, 503);
         }
         if (path === '/api/login/verify' && request.method === 'POST') {
@@ -273,17 +316,17 @@ export function createAccounts(options: { db: Database; origin: string; now: () 
             const flow = takeFlow(body?.flowId, 'login');
             const id = body?.response?.id;
             const row = flow && typeof id === 'string' && id.length <= 1024 ? db.query<{ id: string; user_id: string; public_key: Uint8Array; counter: number; transports: string }, [string]>('SELECT * FROM credentials WHERE id = ?').get(id) : null;
-            if (!flow || !row) return json({ error: 'Sign-in failed.' }, 400);
+            if (!flow || !row || (flow.client === 'web') !== (requestOrigin !== null)) return json({ error: 'Sign-in failed.' }, 400);
             try {
                 const result = await verifyAuthenticationResponse({
-                    response: body!.response, expectedChallenge: flow.challenge, expectedOrigin: options.origin, expectedRPID: rpID, requireUserVerification: false,
+                    response: body!.response, expectedChallenge: flow.challenge, expectedOrigin: expectedOrigins(flow.client), expectedRPID: rpID, requireUserVerification: false,
                     credential: { id: row.id, publicKey: new Uint8Array(row.public_key), counter: row.counter, transports: JSON.parse(row.transports) },
                 });
                 if (!result.verified) throw new Error('unverified');
                 db.query('UPDATE credentials SET counter = ? WHERE id = ?').run(result.authenticationInfo.newCounter, row.id);
             } catch { return json({ error: 'Sign-in failed.' }, 400); }
             const user = db.query<User, [string]>('SELECT id, username FROM users WHERE id = ?').get(row.user_id)!;
-            return json({ user }, 200, { 'Set-Cookie': startSession(user.id) });
+            return signedIn(user, flow.client, 200);
         }
 
         if (path === '/api/push/key' && request.method === 'GET') return push ? json({ publicKey: push.publicKey }) : json({ error: 'Notifications are not configured.' }, 404);
@@ -296,6 +339,24 @@ export function createAccounts(options: { db: Database; origin: string; now: () 
             push.unsubscribe(user.id, (await readBody(request))?.endpoint);
             return json({ status: 'unsubscribed' });
         }
+        if ((path === '/api/push/native' && ['POST', 'DELETE'].includes(request.method)) || (path === '/api/push/native/confirm' && request.method === 'POST')) {
+            if (user.client === 'web') return json({ error: 'Device tokens are for native apps.' }, 403);
+            if (!push?.nativePlatforms.length) return json({ error: 'Native notifications are not configured.' }, 404);
+            const body = await readBody(request);
+            if (request.method === 'DELETE') { push.unregisterNative(user.id, body?.platform, body?.token); return json({ status: 'unregistered' }); }
+            if (path.endsWith('/confirm')) return push.confirmNative(user.id, user.session, body?.platform, body?.token, body?.nonce) ? json({ status: 'registered' }, 201) : json({ error: 'Confirmation expired or invalid. Register again.' }, 400);
+            if (!allowRegister(user.id)) return json({ error: 'Rate limited' }, 429);
+            const outcome = await push.registerNative(user.id, user.session, body?.platform, body?.token, body?.installId);
+            return {
+                registered: () => json({ status: 'registered' }, 201),
+                // The device receives a silent push with a nonce and confirms it at /api/push/native/confirm.
+                pending: () => json({ status: 'pending' }, 202),
+                invalid: () => json({ error: 'Unsupported device token.' }, 400),
+                unconfigured: () => json({ error: 'That notification service is not configured.' }, 404),
+                busy: () => json({ error: 'Too many unconfirmed device tokens. Try again in two minutes.' }, 429),
+                unconfirmed: () => json({ error: 'Confirm this install\'s APNs token before its VoIP token.' }, 409),
+            }[outcome]();
+        }
         if (path === '/api/me' && request.method === 'GET') return json({ user: { id: user.id, username: user.username } });
         if (path === '/api/logout' && request.method === 'POST') {
             // ?all=1 signs out every device of this account.
@@ -303,7 +364,7 @@ export function createAccounts(options: { db: Database; origin: string; now: () 
             else db.query('DELETE FROM sessions WHERE token_hash = ?').run(user.session);
             if (url.searchParams.get('all') === '1') push?.forgetUser(user.id); else push?.forgetSession(user.session);
             closeDeadStreams(user.id);
-            return json({ status: 'signed-out' }, 200, { 'Set-Cookie': `${cookieName}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure ? '; Secure' : ''}` });
+            return user.client === 'web' ? json({ status: 'signed-out' }, 200, { 'Set-Cookie': `${cookieName}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure ? '; Secure' : ''}` }) : json({ status: 'signed-out' });
         }
         if (path === '/api/invites' && request.method === 'POST') {
             const open = db.query<{ count: number }, [string, number]>('SELECT COUNT(*) AS count FROM invites WHERE created_by = ? AND used_by IS NULL AND expires_at > ?').get(user.id, now())!.count;
@@ -481,8 +542,10 @@ export function createAccounts(options: { db: Database; origin: string; now: () 
         },
         // For tests and the bootstrap script; never exposed over HTTP.
         testing: {
+            db,
             createUser(username: string) { const id = random(16); db.query('INSERT INTO users (id, username, created_at) VALUES (?, ?, ?)').run(id, username, now()); return { id, username }; },
-            cookie(userId: string) { return startSession(userId).split(';')[0]!; },
+            cookie(userId: string) { return sessionCookie(startSession(userId).token).split(';')[0]!; },
+            bearer(userId: string, client = 'ios') { return startSession(userId, client).token; },
         },
     };
     return self;

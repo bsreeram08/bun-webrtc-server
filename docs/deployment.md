@@ -54,6 +54,33 @@ Signed-in users can turn on notifications for messages and calls. On first start
 
 On iPhone and iPad, Web Push works only after the user adds the app to the Home Screen and opens it from there (iOS 16.4 or later); the app shows that hint instead of the button. Ringtones are synthesized in the browser and play only while the app is open; a closed app relies on the notification.
 
+### Native apps (iOS, Android, desktop)
+
+The same server serves the native apps. They sign in with passkeys and receive a bearer token instead of a cookie, and they get notifications through Firebase Cloud Messaging (Android) and APNs (iOS). Everything below is optional: without it the web app works as before, the `/.well-known` files return 404 and native push is reported as not configured.
+
+Passkeys and app links need the domain to vouch for the apps. Set these in `deploy/.env` (Compose) or the service environment, then restart signaling:
+
+| Variable | Value | Where it comes from |
+| --- | --- | --- |
+| `APPLE_APP_IDS` | `TEAMID1234.in.sreerams.calls` (comma-separated) | Apple Developer → Membership (Team ID) + the app's bundle ID. Served in `/.well-known/apple-app-site-association` for `webcredentials` (passkeys) and `applinks`. |
+| `ANDROID_PACKAGE` | `in.sreerams.calls` | The Android application ID. |
+| `ANDROID_CERT_SHA256` | `AB:CD:…` (32 colon-separated bytes, comma-separated list) | `keytool -list -v -keystore release.jks` or Play Console → App integrity → App signing key certificate. Use the Play signing key for store builds, plus the upload/debug key while testing. Served in `/.well-known/assetlinks.json`, and also accepted as the Android passkey origin. |
+| `ANDROID_APK_KEY_HASHES` | unpadded base64url SHA-256 (optional) | Extra `android:apk-key-hash:` passkey origins; normally derived from `ANDROID_CERT_SHA256`. |
+
+Apple fetches the association file through its CDN, so it must be reachable over HTTPS on the exact `PUBLIC_ORIGIN` host without redirects; Caddy/nginx must pass `/.well-known/*` to signaling. Startup fails on malformed values rather than silently breaking sign-in.
+
+Native push (all optional, configure the platforms you ship):
+
+| Variable | Purpose |
+| --- | --- |
+| `FCM_SERVICE_ACCOUNT_JSON_PATH` | Path to a Firebase service-account JSON key: Firebase console → Project settings → Service accounts → Generate new private key. Grant it only the Firebase Cloud Messaging role. Store it beside the other secrets, mode `0600`. |
+| `APNS_KEY_PATH`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_BUNDLE_ID` | An APNs authentication key (`AuthKey_XXXX.p8`) from Apple Developer → Certificates, Identifiers & Profiles → Keys (enable Apple Push Notifications service), its 10-character key ID, your Team ID and the app's bundle ID. One key covers alerts and VoIP pushes (topic `<bundle>.voip`). |
+| `APNS_ENV` | `sandbox` for development builds, `production` for TestFlight/App Store. Tokens from one environment are rejected by the other. |
+
+With Compose, put the key files in `deploy/native/` (git-ignored, owner-only, readable by the deployment UID) and point the variables at `/native/…`, e.g. `FCM_SERVICE_ACCOUNT_JSON_PATH=/native/fcm.json` and `APNS_KEY_PATH=/native/AuthKey_ABC123DEFG.p8`. The service sends to `fcm.googleapis.com`, `oauth2.googleapis.com` and `api(.sandbox).push.apple.com` over HTTPS (APNs uses HTTP/2 on 443), so allow outbound HTTPS. Back up the FCM JSON and the `.p8` key with `deploy/.env`; both can be revoked and reissued from the consoles if lost or leaked (revoke immediately on leak: they let anyone push to your users' devices). Device tokens live in the `push_native` table and are removed on sign-out, session expiry and when Google/Apple report them invalid.
+
+`GET /api/version` returns `{ api, minClient }`; raise the minimum versions in `packages/signaling/accounts.ts` (`MIN_CLIENT`) when an app release becomes incompatible.
+
 ## Operation and security boundaries
 
 Rooms and participant credentials live in memory and are lost when Bun restarts. Rooms expire automatically. HTTPS protects signaling; WebRTC encrypts peer media with DTLS-SRTP even when coturn relays it. The service still handles connection metadata, and this is not Signal-style identity verification. Protect administrator credentials and the server/software supply chain. TURN credentials are short-lived and authenticated; quotas and denied private peer ranges limit relay abuse. Default TURN uses UDP/TCP 3478, with encrypted WebRTC media; TURN-over-TLS on 5349/443 is not configured, so networks that block these TURN transports may require a separate TLS TURN endpoint.

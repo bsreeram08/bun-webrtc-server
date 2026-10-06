@@ -5,6 +5,7 @@ import { requestLimiter, requestSource } from './rate-limit';
 import { validateTurnUrl } from './config';
 import { createAccounts, openDatabase, type Accounts, type EventsConnection } from './accounts';
 import { createPush, type PushSend } from './push';
+import { nativeSenderFromEnv, type NativePlatform, type NativeSend } from './native-push';
 
 type Participant = { digest: string; socket?: ServerWebSocket<Connection> };
 type Room = { id: string; expiresAt: number; participants: Participant[]; sessionId?: string; pair?: string[]; kind?: string };
@@ -33,7 +34,43 @@ export type SignalingOptions = {
     pushSend?: PushSend;
     /** How long an online callee's app has to confirm it is ringing before devices get a push. */
     ringAckMs?: number;
+    /** Native app identity: passkey origins and the files that associate this domain with the apps. */
+    apps?: NativeApps;
+    /** FCM/APNs transports for native apps (from the environment, or a test double). */
+    nativePush?: { send: NativeSend; platforms: NativePlatform[] } | null;
 };
+export type NativeApps = { appleAppIds?: string[]; androidPackage?: string; androidCertSha256?: string[]; androidApkKeyHashes?: string[] };
+
+const APPLE_APP_ID = /^[A-Z0-9]{10}\.[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/, ANDROID_PACKAGE = /^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)+$/;
+const CERT_SHA256 = /^([0-9A-F]{2}:){31}[0-9A-F]{2}$/, APK_KEY_HASH = /^[A-Za-z0-9_-]{43}$/;
+/** Validates app identifiers once at startup, so a typo fails loudly instead of silently breaking passkeys. */
+export function nativeApps(env: Record<string, string | undefined> = process.env): NativeApps {
+    const list = (value?: string) => (value ?? '').split(',').map(item => item.trim()).filter(Boolean);
+    const apps: NativeApps = {
+        appleAppIds: list(env.APPLE_APP_IDS), androidPackage: env.ANDROID_PACKAGE?.trim() || undefined,
+        androidCertSha256: list(env.ANDROID_CERT_SHA256).map(value => value.toUpperCase()), androidApkKeyHashes: list(env.ANDROID_APK_KEY_HASHES),
+    };
+    if (apps.appleAppIds!.some(id => !APPLE_APP_ID.test(id))) throw new Error('APPLE_APP_IDS must look like TEAMID1234.com.example.app');
+    if (apps.androidPackage && !ANDROID_PACKAGE.test(apps.androidPackage)) throw new Error('ANDROID_PACKAGE must be a Java package name');
+    if (apps.androidCertSha256!.some(value => !CERT_SHA256.test(value))) throw new Error('ANDROID_CERT_SHA256 must be colon-separated SHA-256 fingerprints');
+    if (apps.androidApkKeyHashes!.some(value => !APK_KEY_HASH.test(value))) throw new Error('ANDROID_APK_KEY_HASHES must be unpadded base64url SHA-256 hashes');
+    return apps;
+}
+/** Origins Android's Credential Manager signs for this app: the key hash of each signing certificate. */
+export function androidOrigins(apps: NativeApps = {}) {
+    const hashes = new Set([...(apps.androidApkKeyHashes ?? []), ...(apps.androidCertSha256 ?? []).map(value => Buffer.from(value.replaceAll(':', ''), 'hex').toString('base64url'))]);
+    return [...hashes].map(value => `android:apk-key-hash:${value}`);
+}
+/** /.well-known files tying this domain to the native apps (passkeys and links); null when unconfigured. */
+export function wellKnown(apps: NativeApps = {}) {
+    return {
+        apple: apps.appleAppIds?.length ? { applinks: { details: [{ appIDs: apps.appleAppIds, components: [{ '/': '/*' }] }] }, webcredentials: { apps: apps.appleAppIds } } : null,
+        android: apps.androidPackage && apps.androidCertSha256?.length ? [{
+            relation: ['delegate_permission/common.get_login_creds', 'delegate_permission/common.handle_all_urls'],
+            target: { namespace: 'android_app', package_name: apps.androidPackage, sha256_cert_fingerprints: apps.androidCertSha256 },
+        }] : null,
+    };
+}
 
 export function startSignaling(options: SignalingOptions) {
     if (options.adminToken.length < 32) throw new Error('ADMIN_TOKEN must contain at least 32 characters');
@@ -70,8 +107,9 @@ export function startSignaling(options: SignalingOptions) {
     function issue(participant: Participant) { const next = token(); participant.digest = digest(next); return next; }
     let accounts: Accounts | undefined;
     const db = options.dataDir ? openDatabase(options.dataDir) : undefined;
-    const push = db && options.dataDir ? createPush({ db, dataDir: options.dataDir, origin: options.origin, send: options.pushSend, now }) : undefined;
-    if (db) accounts = createAccounts({ db, origin: options.origin, now, push, ringAckMs: options.ringAckMs, calls: {
+    const push = db && options.dataDir ? createPush({ db, dataDir: options.dataDir, origin: options.origin, send: options.pushSend, now, native: options.nativePush }) : undefined;
+    const associations = wellKnown(options.apps);
+    if (db) accounts = createAccounts({ db, origin: options.origin, now, push, ringAckMs: options.ringAckMs, androidOrigins: androidOrigins(options.apps), calls: {
         pairRoom(users, requester, kind) {
             let room = pairRooms.get(users.join(':'));
             // A call always gets a fresh room; a chat reuses the live one.
@@ -112,6 +150,11 @@ export function startSignaling(options: SignalingOptions) {
         fetch(request, server) {
             const url = new URL(request.url);
             if (request.method === 'GET' && url.pathname === '/health') return json({ status: 'ok' });
+            // Fetched by Apple's CDN and Google's verifier: exact JSON, no redirect, 404 until configured.
+            if (request.method === 'GET' && (url.pathname === '/.well-known/apple-app-site-association' || url.pathname === '/.well-known/assetlinks.json')) {
+                const file = url.pathname.endsWith('.json') ? associations.android : associations.apple;
+                return file ? new Response(JSON.stringify(file), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=3600', 'X-Content-Type-Options': 'nosniff' } }) : json({ error: 'Not found' }, 404);
+            }
             const source = requestSource(server.requestIP(request)?.address, request.headers, options.trustProxy);
             const requestOrigin = request.headers.get('origin');
             if (requestOrigin && requestOrigin !== options.origin) return json({ error: 'Origin denied' }, 403);
@@ -237,7 +280,7 @@ export function startSignaling(options: SignalingOptions) {
 if (import.meta.main) {
     const rawPort = process.env.PORT ?? '3000';
     if (!/^\d+$/.test(rawPort) || Number(rawPort) < 1 || Number(rawPort) > 65535) throw new Error('PORT must be 1–65535');
-    const app = startSignaling({ adminToken: process.env.ADMIN_TOKEN ?? '', origin: process.env.PUBLIC_ORIGIN ?? 'http://localhost:3000', hostname: process.env.HOST ?? '127.0.0.1', port: Number(rawPort), turnSecret: process.env.TURN_SECRET, turnUrls: process.env.TURN_URLS?.split(',').map(value => value.trim()).filter(Boolean), relayOnly: process.env.RELAY_ONLY === 'true', trustProxy: process.env.TRUST_PROXY === 'true', dataDir: process.env.ACCOUNTS === 'off' ? undefined : process.env.DATA_DIR || 'data' });
+    const app = startSignaling({ adminToken: process.env.ADMIN_TOKEN ?? '', origin: process.env.PUBLIC_ORIGIN ?? 'http://localhost:3000', hostname: process.env.HOST ?? '127.0.0.1', port: Number(rawPort), turnSecret: process.env.TURN_SECRET, turnUrls: process.env.TURN_URLS?.split(',').map(value => value.trim()).filter(Boolean), relayOnly: process.env.RELAY_ONLY === 'true', trustProxy: process.env.TRUST_PROXY === 'true', dataDir: process.env.ACCOUNTS === 'off' ? undefined : process.env.DATA_DIR || 'data', apps: nativeApps(), nativePush: nativeSenderFromEnv() });
     console.log(`Signaling listening on ${app.server.url}`);
     for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, async () => { await app.stop(); process.exit(0); });
 }

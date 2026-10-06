@@ -24,14 +24,15 @@ room returns 401 because its credentials no longer exist.
 
 ### Account API (when `DATA_DIR` accounts are enabled)
 
-Cookie-authenticated JSON endpoints under `/api`. Every non-GET request needs this app's `Origin`.
+JSON endpoints under `/api`. The web app authenticates with the session cookie, and every non-GET request needs this app's `Origin`. Native apps send **no** `Origin` and authenticate with `Authorization: Bearer <session.token>`; any bearer request that carries an `Origin` header is refused (403), and a web cookie session cannot be used as a bearer token or the reverse. Native apps name their platform (`client`: `ios`, `android`, `macos`, `windows` or `linux`) when starting a passkey ceremony and get the session in the response body instead of a cookie.
 
 | Method and path | Result |
 | --- | --- |
-| `POST /api/register/options` `{ invite, username }` | Passkey creation options and a single-use `flowId`. 400 for a bad/used/expired invite or username, 409 if taken. |
-| `POST /api/register/verify` `{ flowId, response }` | Creates the account, consumes the invite, sets the session cookie. |
-| `POST /api/login/options` | Usernameless passkey request options and a `flowId`. |
-| `POST /api/login/verify` `{ flowId, response }` | Sets a fresh session cookie. Failures are always `Sign-in failed.` |
+| `GET /api/version` | `{ api: 1, minClient: { ios, android, macos, windows, linux } }`, public; apps below `minClient` should ask to update. |
+| `POST /api/register/options` `{ invite, username, client? }` | Passkey creation options and a single-use `flowId`. 400 for a bad/used/expired invite or username (or a native request without `client`), 409 if taken. |
+| `POST /api/register/verify` `{ flowId, response }` | Creates the account and consumes the invite. Web: sets the session cookie. Native: `201 { user, session: { token, expiresAt } }`. Native ceremonies also accept the configured Android `android:apk-key-hash:` origins. |
+| `POST /api/login/options` `{ client? }` | Usernameless passkey request options and a `flowId`. |
+| `POST /api/login/verify` `{ flowId, response }` | A fresh session: cookie for the web, `{ user, session }` for native apps. Must finish on the same kind of client that started. Failures are always `Sign-in failed.` |
 | `GET /api/me` · `POST /api/logout[?all=1]` | Current user; sign out this session (or every session). |
 | `POST /api/invites` | A new single-use invite `{ code, expiresAt }`, shown once. At most 20 unused per account. |
 | `GET /api/contacts` | Mutual contacts (with `online`), incoming requests, and outgoing requests (by typed username, `id: null`). |
@@ -44,9 +45,12 @@ Cookie-authenticated JSON endpoints under `/api`. Every non-GET request needs th
 | `GET /api/keys/:username` | Mutual contacts only: `{ userId, identity, signedPreKey, oneTimePreKey }` (`oneTimePreKey` may be `null`). Atomically consumes one one-time prekey; a few per second per pair. |
 | `GET /api/keys/:username/identity` | Mutual contacts only: `{ userId, identity }`, consuming nothing. |
 | `POST /api/messages` `{ to, envelope }` | Mutual contacts only. `envelope` is base64url, at most 64 KiB decoded, opaque to the server. Stored until acknowledged (30-day TTL) and delivered at once to online devices. `201 { id, createdAt }`; 507 when the recipient's mailbox is full (1,000 / 50 MiB); 429 for the per-sender share (200 / 10 MiB) or the rate limit. |
-| `GET /api/events` (WebSocket) | Stream of `hello` (online contacts), `presence`, `contacts` (refetch), `incoming` `{ from, kind, roomId, token }`, `ended`, `keys` `{ id }` (a contact's identity was set or changed: re-check it) and `envelope` `{ id, from: { id, username }, envelope, createdAt }` in order, at most 32 unacknowledged at once. The only client message is `{ "type": "ack", "id" }`, which deletes that envelope if it is addressed to this account; anything else closes the stream (1008). Closes with 4401 when the session ends. |
+| `POST /api/push/native` `{ platform: "fcm" \| "apns" \| "apns-voip", token, installId }` | Native sessions only (403 for web). `installId` is a random 16–64 character id the app generates once per install. For `fcm`/`apns`: `202 pending` and the server sends that token a silent push `{ type: "verify", nonce }` (FCM data message; APNs `background` push with `content-available`); `201` if already bound to this session. For `apns-voip`: requires a confirmed `apns` token with the same `installId` in this session (otherwise 409). An unclaimed VoIP token binds at once (`201`); one held by another session answers `202 pending` and the server sends it a VoIP push `{ type: "verify", nonce }` — the app must report it to CallKit and end that call immediately, then confirm the nonce. 400 malformed or rejected by Google/Apple, 404 transport not configured, 429 more than five unconfirmed tokens or too fast. |
+| `POST /api/push/native/confirm` `{ platform, token, nonce }` | Activates a pending FCM/APNs registration with the nonce the device received. Single use (a wrong nonce spends it) and valid for two minutes; until then any existing binding of that token stays with its owner. |
+| `DELETE /api/push/native` `{ platform, token }` | Removes the token if this account holds it. Tokens are also removed on sign-out, session expiry and invalid-token responses. Messages go to FCM and APNs alerts; calls go to FCM (high priority) and, on a device with a VoIP token, to PushKit instead of an alert. |
+| `GET /api/events` (WebSocket; cookie + origin, or bearer without origin) | Stream of `hello` (online contacts), `presence`, `contacts` (refetch), `incoming` `{ from, kind, roomId, token }`, `ended`, `keys` `{ id }` (a contact's identity was set or changed: re-check it) and `envelope` `{ id, from: { id, username }, envelope, createdAt }` in order, at most 32 unacknowledged at once. The only client message is `{ "type": "ack", "id" }`, which deletes that envelope if it is addressed to this account; anything else closes the stream (1008). Closes with 4401 when the session ends. |
 
-Room sockets for contact rooms close with 4001 when a newer call replaces the room and 4002 when the call is declined.
+Native apps open `/api/events` with `Authorization: Bearer` and no `Origin`, and room sockets with `Origin` set to the server's public origin (room sockets are authorised by the participant credential). Room sockets for contact rooms close with 4001 when a newer call replaces the room and 4002 when the call is declined.
 
 The default lifetime is one hour, and state is memory-only. Server restart ends
 all rooms. Each invitation grants one participant slot; it is not proof of human
