@@ -284,7 +284,7 @@ describe('native push', () => {
         expect((await register(alice.bearer, 'apns', apnsToken)).status).toBe(400);
         expect(app.accounts!.testing.db.query('SELECT COUNT(*) AS count FROM push_native_pending').get()).toEqual({ count: 0 });
     });
-    test('VoIP tokens bind only beside a confirmed APNs token of the same install, and never displace another session', async () => {
+    test('VoIP tokens bind only beside a confirmed APNs token of the same install; a contested binding is held briefly, never forever', async () => {
         const alice = user('alice'), mallory = user('mallory');
         expect((await register(alice.bearer, 'apns-voip', voipToken)).status).toBe(409);
         await bind(alice.bearer, 'apns', apnsToken);
@@ -295,6 +295,14 @@ describe('native push', () => {
         expect((await register(mallory.bearer, 'apns-voip', voipToken, otherInstall)).status).toBe(409);
         expect(owner('apns-voip', voipToken)).toBe(alice.id);
         expect((await confirm(alice.bearer, 'apns-voip', voipToken, 'x')).status).toBe(400);
+        // A squatter cannot keep a device's VoIP token: once the hold lapses, the real install reclaims it.
+        app.accounts!.testing.db.query("UPDATE push_native SET created_at = 0 WHERE platform = 'apns-voip'").run();
+        expect((await register(mallory.bearer, 'apns-voip', voipToken, otherInstall)).status).toBe(201);
+        expect((await register(alice.bearer, 'apns-voip', voipToken)).status).toBe(409);
+        app.accounts!.testing.db.query("UPDATE push_native SET created_at = 0 WHERE platform = 'apns-voip'").run();
+        await Bun.sleep(1000); // Fresh rate-limit window.
+        expect((await register(alice.bearer, 'apns-voip', voipToken)).status).toBe(201);
+        expect(owner('apns-voip', voipToken)).toBe(alice.id);
     });
     test('messages reach FCM and APNs alerts; calls use VoIP instead of an alert on that device; no text ever', async () => {
         const alice = user('alice'), bob = user('bob');

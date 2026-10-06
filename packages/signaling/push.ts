@@ -18,6 +18,7 @@ const HOSTS = ['fcm.googleapis.com', 'updates.push.services.mozilla.com'];
 const SUFFIXES = ['.push.apple.com', '.notify.windows.com'];
 const B64URL = /^[A-Za-z0-9_-]+$/;
 const MAX_PER_USER = 10, MAX_NATIVE_PER_USER = 20, MAX_PENDING_PER_USER = 5, PENDING_LIFETIME = 120000;
+const VOIP_HOLD = 10 * 60000; // A contested VoIP binding can change hands at most this often.
 const INSTALL_ID = /^[A-Za-z0-9_-]{16,64}$/;
 const digest = (value: string) => createHash('sha256').update(value).digest();
 export type NativeRegistration = 'registered' | 'pending' | 'invalid' | 'unconfigured' | 'busy' | 'conflict' | 'unconfirmed';
@@ -79,14 +80,16 @@ export function createPush(options: { db: Database; dataDir: string; origin: str
          * only after the device echoes a nonce pushed to that token (confirmNative), so nobody can redirect
          * another device's notifications by registering its token. Until then any existing binding stays.
          * PushKit VoIP tokens cannot take a silent nonce push (iOS requires every VoIP push to report a call),
-         * so they bind only beside a confirmed APNs token of the same app install, and never displace a
-         * binding held by another session.
+         * so they bind only beside a confirmed APNs token of the same app install. Ownership of a VoIP token
+         * cannot be proven, so no binding is permanent: a newer claim from a confirmed install takes it over
+         * once the current binding is VOIP_HOLD old. A squatter can therefore delay, never keep, a device's
+         * call pushes (the device re-registers on every launch); calls also fall back to the APNs alert.
          */
         async registerNative(userId: string, session: string, platform: unknown, value: unknown, installId: unknown): Promise<NativeRegistration> {
             const token = validNativeToken(platform, value);
             if (!token || typeof installId !== 'string' || !INSTALL_ID.test(installId)) return 'invalid';
             if (!native?.platforms.includes(platform as NativePlatform)) return 'unconfigured';
-            const bound = db.query<{ session_hash: string; install_id: string }, [string, string]>('SELECT session_hash, install_id FROM push_native WHERE platform = ? AND token = ?').get(platform as string, token);
+            const bound = db.query<{ session_hash: string; install_id: string; created_at: number }, [string, string]>('SELECT session_hash, install_id, created_at FROM push_native WHERE platform = ? AND token = ?').get(platform as string, token);
             if (bound?.session_hash === session && bound.install_id === installId) return 'registered';
             const bind = () => db.transaction(() => {
                 db.query('INSERT OR REPLACE INTO push_native (platform, token, user_id, session_hash, install_id, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(platform as string, token, userId, session, installId, now());
@@ -94,7 +97,7 @@ export function createPush(options: { db: Database; dataDir: string; origin: str
             })();
             if (platform === 'apns-voip') {
                 if (!db.query("SELECT 1 FROM push_native WHERE platform = 'apns' AND session_hash = ? AND install_id = ?").get(session, installId)) return 'unconfirmed';
-                if (bound && bound.session_hash !== session) return 'conflict';
+                if (bound && bound.session_hash !== session && now() - bound.created_at < VOIP_HOLD) return 'conflict';
                 bind(); return 'registered';
             }
             db.query('DELETE FROM push_native_pending WHERE expires_at <= ?').run(now());
