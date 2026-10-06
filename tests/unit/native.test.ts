@@ -315,6 +315,11 @@ describe('native push', () => {
         await Bun.sleep(1000); // Fresh rate-limit window: the per-token budget is what refuses.
         expect((await register(mallory.bearer, 'apns-voip', voipToken, otherInstall)).status).toBe(429);
         expect(sent.filter(item => item.platform === 'apns-voip')).toHaveLength(1);
+        // Mallory's spent budget does not stop the real holder's install from proving it again.
+        await Bun.sleep(1000);
+        const carol = user('carol');
+        await bind(carol.bearer, 'apns', '34'.repeat(32), 'install-cccccccccccccccc');
+        expect((await register(carol.bearer, 'apns-voip', voipToken, 'install-cccccccccccccccc')).status).toBe(202);
     });
     test('messages reach FCM and APNs alerts; calls use VoIP instead of an alert on that device; no text ever', async () => {
         const alice = user('alice'), bob = user('bob');

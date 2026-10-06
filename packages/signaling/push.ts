@@ -18,7 +18,9 @@ const HOSTS = ['fcm.googleapis.com', 'updates.push.services.mozilla.com'];
 const SUFFIXES = ['.push.apple.com', '.notify.windows.com'];
 const B64URL = /^[A-Za-z0-9_-]+$/;
 const MAX_PER_USER = 10, MAX_NATIVE_PER_USER = 20, MAX_PENDING_PER_USER = 5, PENDING_LIFETIME = 120000;
-// Verification pushes per device token, whoever asks: a VoIP one rings CallKit, so at most one an hour.
+// Verification pushes per device token and claiming account: a VoIP one rings CallKit, so one an hour each.
+// Per account (not per token) so one claimant cannot spend the budget the real device needs to reclaim it;
+// accounts are invite-only, which bounds how many flashes a token-holder could cause.
 const VERIFY_WINDOW = 3600000, VERIFY_LIMIT: Record<string, number> = { 'apns-voip': 1, apns: 5, fcm: 5 };
 const INSTALL_ID = /^[A-Za-z0-9_-]{16,64}$/;
 const digest = (value: string) => createHash('sha256').update(value).digest();
@@ -106,7 +108,7 @@ export function createPush(options: { db: Database; dataDir: string; origin: str
             const pending = db.query<{ count: number }, [string, string, string, string]>('SELECT COUNT(*) AS count FROM push_native_pending WHERE user_id = ? AND NOT (platform = ? AND token = ? AND session_hash = ?)').get(userId, platform as string, token, session)!.count;
             if (pending >= MAX_PENDING_PER_USER) return 'busy';
             // ponytail: in-memory per-token budget; resets on restart, which only ever loosens it by one window.
-            const key = `${platform}:${token}`, recent = (verifySent.get(key) ?? []).filter(time => time > now() - VERIFY_WINDOW);
+            const key = `${platform}:${token}:${userId}`, recent = (verifySent.get(key) ?? []).filter(time => time > now() - VERIFY_WINDOW);
             if (recent.length >= VERIFY_LIMIT[platform as string]!) return 'busy';
             verifySent.set(key, [...recent, now()]);
             if (verifySent.size > 10000) for (const [entry, times] of verifySent) if (!times.some(time => time > now() - VERIFY_WINDOW)) verifySent.delete(entry);
