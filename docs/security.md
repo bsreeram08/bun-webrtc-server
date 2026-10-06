@@ -41,6 +41,12 @@ The pinned identity is stored per contact user id and is never erased by burning
 
 Each account supports one messaging device at a time: signing in on a new browser creates a new identity, which replaces the old one for everyone (and shows them the change). Restoring an encrypted backup restores message history only, never keys, so contacts see a key change there too.
 
+### Key rotation
+
+The Double Ratchet already changes message keys with every reply. On top of that, either person can **reset the secure session** from a chat's ⋯ menu: the next message starts a new X3DH handshake from the contact's current published keys, and an encrypted `rotate` control message tells the other device to keep only that new session, dropping the old chain keys. Older sessions are kept (bounded) only until the peer answers on the new one, so messages already in flight still decrypt; a `rotate` that arrives on an older session is ignored and can never make an old chain the one in use. Each person can also choose an automatic schedule (off, daily, weekly, every 30 days). Devices tell each other their choice in an encrypted `policy` message, and a chat rotates on the **shorter** of the two non-off intervals before the next message once its session is older than that. A reset never changes the security code or the pinned identity, and `rotate`/`policy` messages from a contact whose security code changed and hasn't been accepted are ignored. Reset notices are local rows that are never sent, never exported to backups, coalesce to one per minute per chat and count toward the per-conversation limit.
+
+**Identity keys do not rotate on a schedule.** "Generate new identity keys" in Settings exists for a device you think was exposed: it makes a new identity, signed prekey and one-time prekeys, and every contact sees your security code change (verified contacts must re-verify before sending to you). Doing that automatically would make security-code warnings routine and teach people to accept them without checking, which is exactly the habit an attacker who swaps keys relies on.
+
 ## Notifications
 
 Push notifications are opt-in per device. The server stores each subscription (push-service endpoint and the browser's public encryption keys) with the session that created it; signing out removes it, as do expired sessions and push-service `404`/`410` responses. Endpoints must be HTTPS URLs on known push services (Google FCM, Mozilla, Apple, Microsoft), so the server never sends requests to arbitrary hosts.
