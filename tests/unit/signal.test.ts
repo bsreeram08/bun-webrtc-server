@@ -398,6 +398,30 @@ describe('key rotation', () => {
         // A message on the dropped old session can no longer be decrypted.
         await expect(deliver(A, 'bob', inFlightFromBob)).rejects.toMatchObject({ code: 'unknown-session' });
     });
+    test('a pending rotation is never undone by a message on an old session: the next send still opens a new session', async () => {
+        const { A, B, bundleOf, deliver } = await people();
+        await deliver(B, 'alice', await A.encryptTo('bob', { n: 1 }, () => bundleOf(B)));
+        await deliver(A, 'bob', await B.encryptTo('alice', { n: 2 }, () => bundleOf(A)));
+        const old = (await A.sessionInfo('bob')).sid;
+        const late = await B.encryptTo('alice', { n: 3 }, () => bundleOf(A));
+        await A.rotate('bob');
+        expect(await deliver(A, 'bob', late)).toEqual({ n: 3 }); // Arrives before alice sends again.
+        const next = await A.encryptTo('bob', { type: 'rotate' }, () => bundleOf(B));
+        expect(JSON.parse(atob(next.replace(/-/g, '+').replace(/_/g, '/'))).x).toBeTruthy();
+        expect((await A.sessionInfo('bob')).sid).not.toBe(old);
+    });
+    test('an identity reset waits for in-flight work and leaves no session of the old identity behind', async () => {
+        const { alice, A, B, bundleOf } = await people();
+        let release: (value: any) => void = () => {};
+        const slowBundle = new Promise(resolve => { release = resolve; });
+        const sending = A.encryptTo('bob', { n: 1 }, () => slowBundle); // Holds alice's queue for bob.
+        const oldIdentity = (await A.identity()).pub;
+        const reset = A.resetIdentity();
+        release(await bundleOf(B));
+        await sending; await reset;
+        expect(alice.map.get('sessions:bob')).toBeUndefined();
+        expect((await A.identity()).pub).not.toEqual(oldIdentity);
+    });
     test('a reset arriving on an old session is ignored and never makes an old chain the survivor', async () => {
         const { bob, A, B, bundleOf, deliver } = await people();
         await deliver(B, 'alice', await A.encryptTo('bob', { n: 1 }, () => bundleOf(B)));

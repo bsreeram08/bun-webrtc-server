@@ -204,9 +204,12 @@
       try { return await rawBackend[name](...args); } catch (error) { throw Object.assign(new Error(`Key storage failed: ${error?.message || error}`), { code: 'storage' }); }
     }]));
     const locks = new Map();
+    // An identity reset holds this barrier: every queued task waits, so nothing writes keys of the old identity
+    // after (or while) they are erased.
+    let barrier = Promise.resolve();
     function serial(key, task) {
-      const previous = locks.get(key) || Promise.resolve();
-      const next = previous.catch(() => {}).then(task);
+      const previous = locks.get(key) || Promise.resolve(), gate = barrier;
+      const next = Promise.all([previous.catch(() => {}), gate]).then(task);
       locks.set(key, next.catch(() => {}));
       return next;
     }
@@ -266,7 +269,8 @@
     function remember(record, state, makeActive) {
       record = { ...record, list: { ...record.list, [state.sid]: state }, order: [...record.order.filter(sid => sid !== state.sid), state.sid] };
       while (record.order.length > MAX_SESSIONS) delete record.list[record.order.shift()];
-      if (makeActive || !record.active || !record.list[record.active]) record.active = state.sid;
+      // While a rotation is pending nothing old may become active again: the next send must open a new session.
+      if (makeActive || (!record.rotating && (!record.active || !record.list[record.active]))) record.active = state.sid;
       return record;
     }
     function encryptTo(contactId, plaintext, fetchBundle) {
@@ -274,7 +278,7 @@
         await assertSendable(contactId);
         let record = await sessions(contactId);
         let state = record.active && record.list[record.active];
-        if (!state || !state.cks) {
+        if (record.rotating || !state || !state.cks) {
           const bundle = await fetchBundle();
           await notePeer(contactId, bundle.identity);
           await assertSendable(contactId);
@@ -385,10 +389,18 @@
      * changing it on a timer would teach people to ignore those warnings.
      */
     function resetIdentity() {
-      return serial('prekeys', () => serial('x3dh', async () => {
-        for (const prefix of ['sessions:', 'opk:', 'claim:', 'claims:']) await backend.deletePrefix(prefix);
-        await backend.batch([{ delete: 'identity' }, { delete: 'spk' }, { delete: 'opk-next' }]);
-      }));
+      // Close the gate first (synchronously), then wait for everything already queued on any key, so no
+      // in-flight encrypt/decrypt can write a session of the old identity after the erase.
+      const inFlight = [...locks.values()], prior = barrier;
+      let release;
+      barrier = new Promise(resolve => { release = resolve; });
+      return (async () => {
+        try {
+          await prior; await Promise.all(inFlight.map(task => task.catch(() => {})));
+          for (const prefix of ['sessions:', 'opk:', 'claim:', 'claims:']) await backend.deletePrefix(prefix);
+          await backend.batch([{ delete: 'identity' }, { delete: 'spk' }, { delete: 'opk-next' }]);
+        } finally { release(); }
+      })();
     }
     async function safety(myUsername, contactId, theirUsername) {
       const me = await identity(), peer = await backend.get(`peer:${contactId}`);
