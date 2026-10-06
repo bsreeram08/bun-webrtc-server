@@ -297,11 +297,24 @@ describe('native push', () => {
         expect(sent.filter(item => item.platform === 'apns-voip').map(item => item.payload.type)).toEqual(['verify']);
         expect((await confirm(mallory.bearer, 'apns-voip', voipToken, 'guess')).status).toBe(400);
         expect(owner('apns-voip', voipToken)).toBe(alice.id);
-        // The device that really holds the token (it received the nonce) can always move it back.
+        // The device that really holds a token (it receives the nonce) can always move it.
+        const second = '12'.repeat(32);
         await Bun.sleep(1000); // Fresh rate-limit window.
+        expect((await register(alice.bearer, 'apns-voip', second)).status).toBe(201);
+        await Bun.sleep(1000);
+        expect((await register(mallory.bearer, 'apns-voip', second, otherInstall)).status).toBe(202);
+        expect((await confirm(mallory.bearer, 'apns-voip', second, nonceFor(second))).status).toBe(201);
+        expect(owner('apns-voip', second)).toBe(mallory.id);
+    });
+    test('verification pushes to one device token are budgeted, so claims cannot be used to ring a phone repeatedly', async () => {
+        const alice = user('alice'), mallory = user('mallory');
+        await bind(alice.bearer, 'apns', apnsToken);
+        expect((await register(alice.bearer, 'apns-voip', voipToken)).status).toBe(201);
+        await bind(mallory.bearer, 'apns', 'ef'.repeat(32), otherInstall);
         expect((await register(mallory.bearer, 'apns-voip', voipToken, otherInstall)).status).toBe(202);
-        expect((await confirm(mallory.bearer, 'apns-voip', voipToken, nonceFor(voipToken))).status).toBe(201);
-        expect(owner('apns-voip', voipToken)).toBe(mallory.id);
+        await Bun.sleep(1000); // Fresh rate-limit window: the per-token budget is what refuses.
+        expect((await register(mallory.bearer, 'apns-voip', voipToken, otherInstall)).status).toBe(429);
+        expect(sent.filter(item => item.platform === 'apns-voip')).toHaveLength(1);
     });
     test('messages reach FCM and APNs alerts; calls use VoIP instead of an alert on that device; no text ever', async () => {
         const alice = user('alice'), bob = user('bob');

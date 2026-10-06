@@ -18,6 +18,8 @@ const HOSTS = ['fcm.googleapis.com', 'updates.push.services.mozilla.com'];
 const SUFFIXES = ['.push.apple.com', '.notify.windows.com'];
 const B64URL = /^[A-Za-z0-9_-]+$/;
 const MAX_PER_USER = 10, MAX_NATIVE_PER_USER = 20, MAX_PENDING_PER_USER = 5, PENDING_LIFETIME = 120000;
+// Verification pushes per device token, whoever asks: a VoIP one rings CallKit, so at most one an hour.
+const VERIFY_WINDOW = 3600000, VERIFY_LIMIT: Record<string, number> = { 'apns-voip': 1, apns: 5, fcm: 5 };
 const INSTALL_ID = /^[A-Za-z0-9_-]{16,64}$/;
 const digest = (value: string) => createHash('sha256').update(value).digest();
 export type NativeRegistration = 'registered' | 'pending' | 'invalid' | 'unconfigured' | 'busy' | 'unconfirmed';
@@ -62,6 +64,7 @@ export function createPush(options: { db: Database; dataDir: string; origin: str
     // Registrations waiting for the device to echo the nonce pushed to it; only the nonce's hash is kept.
     db.exec(`CREATE TABLE IF NOT EXISTS push_native_pending (platform TEXT NOT NULL, token TEXT NOT NULL, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         session_hash TEXT NOT NULL, install_id TEXT NOT NULL, nonce_hash BLOB NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY (platform, token, session_hash))`);
+    const verifySent = new Map<string, number[]>();
     const native = options.native ?? null;
     const keys = vapidKeys(options.dataDir);
     const origin = new URL(options.origin);
@@ -102,6 +105,11 @@ export function createPush(options: { db: Database; dataDir: string; origin: str
             db.query('DELETE FROM push_native_pending WHERE expires_at <= ?').run(now());
             const pending = db.query<{ count: number }, [string, string, string, string]>('SELECT COUNT(*) AS count FROM push_native_pending WHERE user_id = ? AND NOT (platform = ? AND token = ? AND session_hash = ?)').get(userId, platform as string, token, session)!.count;
             if (pending >= MAX_PENDING_PER_USER) return 'busy';
+            // ponytail: in-memory per-token budget; resets on restart, which only ever loosens it by one window.
+            const key = `${platform}:${token}`, recent = (verifySent.get(key) ?? []).filter(time => time > now() - VERIFY_WINDOW);
+            if (recent.length >= VERIFY_LIMIT[platform as string]!) return 'busy';
+            verifySent.set(key, [...recent, now()]);
+            if (verifySent.size > 10000) for (const [entry, times] of verifySent) if (!times.some(time => time > now() - VERIFY_WINDOW)) verifySent.delete(entry);
             const nonce = randomBytes(32).toString('base64url');
             db.query('INSERT OR REPLACE INTO push_native_pending (platform, token, user_id, session_hash, install_id, nonce_hash, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
                 .run(platform as string, token, userId, session, installId, digest(nonce), now() + PENDING_LIFETIME);
