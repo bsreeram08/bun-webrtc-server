@@ -92,17 +92,22 @@
   /**
    * Stores one decrypted incoming message, idempotent by id, using the same validation as every stored
    * record. Deterministic rejections carry a code so the caller acknowledges and discards the envelope
-   * instead of retrying forever: 'invalid' (including a timestamp more than five minutes in the future,
-   * which would pin a message to the end of every list), 'conflict' (an id reused with other content),
+   * instead of retrying forever: 'invalid', 'conflict' (an id reused with other content),
    * 'conversation-full' (500 incoming messages from this conversation: only this sender is refused, so one
    * contact cannot crowd out the others) and 'full' (the 2,000-message device cap). Nothing is evicted.
    * Resolves to 'stored', 'duplicate' or 'expired'.
    */
   async function receive(conversationId, payload) {
-    let message;
-    try { message = validate({ id: payload?.id, conversationId, direction: 'incoming', text: payload?.text, createdAt: payload?.createdAt, status: 'delivered', expiresAt: payload?.expiresAt }); }
+    let message, createdAt = payload?.createdAt, expiresAt = payload?.expiresAt;
+    // A sender whose clock runs ahead must not lose messages (nor pin them to the end of every list):
+    // date them on arrival and keep their disappearing lifetime.
+    const now = Date.now();
+    if (Number.isSafeInteger(createdAt) && createdAt > now + CLOCK_SKEW) {
+      if (Number.isSafeInteger(expiresAt)) expiresAt -= createdAt - now;
+      createdAt = now;
+    }
+    try { message = validate({ id: payload?.id, conversationId, direction: 'incoming', text: payload?.text, createdAt, status: 'delivered', expiresAt }); }
     catch { throw coded('invalid', 'Invalid incoming message.'); }
-    if (message.createdAt > Date.now() + CLOCK_SKEW) throw coded('invalid', 'Incoming message is dated in the future.');
     if (expired(message)) return 'expired';
     return transaction((active, now) => {
       if (expired(message, now)) return { result: 'expired' };
@@ -124,7 +129,7 @@
    * Storage errors and anything uncoded or unknown are retried, and acknowledged with a notice only
    * after `limit` attempts. Every discard except a true replay is reported.
    */
-  const PERMANENT = { replay: null, full: 'storage-full', 'conversation-full': 'conversation-full', invalid: 'invalid', conflict: 'invalid', mismatch: 'invalid', malformed: 'undecryptable', auth: 'undecryptable', 'skip-limit': 'undecryptable', 'unknown-session': 'undecryptable', 'unknown-spk': 'undecryptable', 'claim-limit': 'undecryptable' };
+  const PERMANENT = { replay: null, full: 'storage-full', 'conversation-full': 'conversation-full', invalid: 'invalid', conflict: 'conflict', mismatch: 'mismatch', malformed: 'undecryptable', auth: 'undecryptable', 'skip-limit': 'undecryptable', 'unknown-session': 'undecryptable', 'unknown-spk': 'undecryptable', 'claim-limit': 'undecryptable' };
   function inboundDisposition(error, attempts, limit = 3) {
     if (!error) return { ack: true, notice: null };
     if (typeof error.code === 'string' && Object.hasOwn(PERMANENT, error.code)) return { ack: true, notice: PERMANENT[error.code] };

@@ -207,7 +207,9 @@
     const notice = {
       'storage-full': `A message from ${from.username} was discarded: this device holds 2,000 messages. Clear some history to receive more.`,
       'conversation-full': `A message from ${from.username} was discarded: this conversation holds 500 incoming messages. Burn or clear it to receive more from them.`,
-      invalid: `A message from ${from.username} could not be verified and was discarded. If they use more than one browser or device (for example Safari and the Home Screen app), ask them to use the one where messaging is active.`,
+      invalid: `A message from ${from.username} had invalid content and was discarded.`,
+      conflict: `A message from ${from.username} reused an earlier message's id with different text, and was discarded.`,
+      mismatch: `A message from ${from.username} came from keys that are not their active ones, and was discarded. If they use more than one browser or device (for example Safari and the Home Screen app), ask them to use the one where messaging is active.`,
       'gave-up': `A message from ${from.username} could not be saved after several tries and was discarded.`,
       undecryptable: `A message from ${from.username} could not be decrypted and was discarded.`,
     }[outcome.notice];

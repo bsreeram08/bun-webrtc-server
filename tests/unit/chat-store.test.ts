@@ -213,10 +213,13 @@ describe('incoming mailbox messages', () => {
     expect(store.inboundDisposition({ code: 'conversation-full' }, 1)).toEqual({ ack: true, notice: 'conversation-full' });
     expect(await store.receive(other, payload())).toBe('stored');
   });
-  test('incoming messages dated more than five minutes in the future are rejected', async () => {
+  test('a sender whose clock runs ahead loses nothing: the message is dated on arrival and keeps its lifetime', async () => {
     const { store } = fixture();
-    await expect(store.receive(ROOM, payload({ createdAt: NOW + 600000 }))).rejects.toMatchObject({ code: 'invalid' });
-    expect(await store.receive(ROOM, payload({ createdAt: NOW + 60000 }))).toBe('stored');
+    const ahead = NOW + 3600000, id = crypto.randomUUID(); // The fixture clock reads NOW.
+    expect(await store.receive(ROOM, payload({ id, createdAt: ahead, expiresAt: ahead + 600000 }))).toBe('stored');
+    const stored = (await store.list()).find(message => message.id === id)!;
+    expect(stored.createdAt).toBe(NOW);
+    expect(stored.expiresAt! - stored.createdAt).toBe(600000);
   });
   test('a flood from one contact fills the device cap with a deterministic "full" rejection instead of a stall', async () => {
     const { store } = fixture();
@@ -228,7 +231,7 @@ describe('incoming mailbox messages', () => {
     const { store } = fixture();
     expect(store.inboundDisposition(null, 1)).toEqual({ ack: true, notice: null });
     expect(store.inboundDisposition({ code: 'replay' }, 1)).toEqual({ ack: true, notice: null });
-    for (const code of ['invalid', 'conflict', 'mismatch']) expect(store.inboundDisposition({ code }, 1)).toEqual({ ack: true, notice: 'invalid' });
+    for (const code of ['invalid', 'conflict', 'mismatch']) expect(store.inboundDisposition({ code }, 1)).toEqual({ ack: true, notice: code });
     for (const code of ['auth', 'malformed', 'skip-limit', 'unknown-session', 'unknown-spk', 'claim-limit']) expect(store.inboundDisposition({ code }, 1)).toEqual({ ack: true, notice: 'undecryptable' });
     for (const error of [{ code: 'storage' }, new Error('IndexedDB hiccup'), { code: 'something-new' }, 'thrown string']) {
       expect(store.inboundDisposition(error, 1)).toEqual({ ack: false, notice: 'retrying' });
