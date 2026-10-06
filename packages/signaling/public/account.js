@@ -62,6 +62,7 @@
     try { unread = JSON.parse(localStorage.getItem(`unread-v1:${me.id}`) || '{}') || {}; } catch { unread = {}; }
     ready = setupKeys(user);
     window.Theme?.setAccount(user.id);
+    $('rotation-every').value = String(myRotation());
     loadContacts(); connectEvents(); window.Alerts?.signedIn();
   }
   function signedOut(message = '') {
@@ -160,21 +161,15 @@
 
   // ---------- Receiving ----------
   const coded = (code, text) => Object.assign(new Error(text), { code });
-  // Shape only; message content is validated by ChatStore.receive, the same rules every stored record meets.
-  function checkPayload(payload) {
-    if (!payload || payload.v !== 1 || !window.ChatStore.isMessageId(payload.id)) throw coded('invalid', 'Invalid message');
-    const size = Object.keys(payload).length;
-    if (!((payload.type === 'receipt' || payload.type === 'burn') && size === 3 || payload.type === 'message' && size === 6)) throw coded('invalid', 'Invalid message');
-  }
   const attempts = new Map();
   async function receiveEnvelope(socket, message) {
     if (!await ready || !box) return; // Unacknowledged: redelivered once this device can decrypt.
     if (inactive) return; // Meant for the active device: never decrypt-fail and acknowledge it away.
     const from = message.from, conversationId = await pairId(from.id), viewing = () => body.dataset.screen === 'conversation' && current?.id === from.id;
-    let receipt = null, burned = false, failure = null;
+    let receipt = null, burned = false, rotated = false, failure = null;
     try {
       await box.decryptFrom(from.id, message.envelope, async (payload, info) => {
-        checkPayload(payload);
+        const type = window.ChatStore.checkPayload(payload); // Shape only; message content is validated by ChatStore.receive.
         // Defence in depth only: the pinned identity in signal.js (peer:<user id>, never deleted by burn,
         // contact removal or forget) is the trust boundary, because a hostile server controls this lookup too.
         // A mismatch with the published key still catches a mislabelled `from` from an honest-but-buggy relay.
@@ -186,9 +181,15 @@
         // Until the user accepts a changed security code, the new identity may deliver (flagged) messages
         // but may not burn history or mark our messages delivered.
         const untrusted = info.identityChanged || Boolean((await box.peer(from.id))?.blocked);
-        if (untrusted && payload.type !== 'message') return;
+        if (untrusted && type !== 'message') return;
         try {
-          if (payload.type === 'receipt') await window.ChatStore.setStatus(conversationId, payload.id, 'delivered');
+          if (type === 'rotate') {
+            rotated = true;
+            await window.ChatStore.note(conversationId, payload.id, `🔄 ${payload.reason === 'manual' ? 'Secure session reset' : 'Keys rotated on schedule'} by ${from.username}`);
+            return { rotate: true }; // The box keeps only the peer's new session, in its own write.
+          }
+          else if (type === 'policy') rememberPeerRotation(from.id, payload.rotateEveryMs);
+          else if (payload.type === 'receipt') await window.ChatStore.setStatus(conversationId, payload.id, 'delivered');
           else if (payload.type === 'burn') { await window.ChatStore.removeConversation(conversationId); burned = true; }
           else if (await window.ChatStore.receive(conversationId, payload) === 'stored') {
             // Idempotent by message id: duplicates are neither shown, counted nor acknowledged twice.
@@ -220,6 +221,8 @@
       if (viewing()) App.chatStatus(`${from.username} burned this conversation. It was deleted on this device.`);
       else say('chats-status', `${from.username} burned your conversation. It was deleted on this device.`);
     }
+    // Our policy rides on the new session, which also lets the peer drop its old chains.
+    if (rotated && !failure) tellPolicy(from).catch(() => {});
     if (viewing()) { App.refreshHistory(); updateBanner(); }
     render();
     if (receipt) sendControl(from, { v: 1, type: 'receipt', id: receipt }).catch(() => {});
@@ -242,8 +245,11 @@
       const records = await window.ChatStore.list();
       for (const contact of contacts.filter(value => value.state === 'mutual')) {
         const conversationId = await pairId(contact.id);
-        for (const record of records.filter(value => value.conversationId === conversationId && value.direction === 'outgoing' && value.status === 'queued')) {
+        const queued = records.filter(value => value.conversationId === conversationId && value.direction === 'outgoing' && value.status === 'queued');
+        let prepared = false;
+        for (const record of queued) {
           try {
+            if (!prepared) { await rotateIfDue(contact); await tellPolicy(contact); prepared = true; }
             await sendControl(contact, { v: 1, type: 'message', id: record.id, text: record.text, createdAt: record.createdAt, expiresAt: record.expiresAt });
             await window.ChatStore.setStatus(conversationId, record.id, 'sent');
           } catch (error) {
@@ -272,6 +278,76 @@
     App.chatStatus(`Burned on this device. ${contact.username}'s device deletes its copy when the encrypted request arrives.`);
   };
   App.flagged = record => flagged.has(record.id.toLowerCase());
+
+  // ---------- Key rotation ----------
+  // Sessions (ratchets) rotate; identities do not rotate on a timer — that would make security-code changes
+  // routine and teach people to ignore them. Each side picks an interval; a chat uses the shorter one.
+  const readJson = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } };
+  const writeJson = (key, value) => { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} };
+  const myRotation = () => Number(readJson(`rotation-v1:${me.id}`, 0)) || 0;
+  const peerRotation = id => Number(readJson(`rotation-peer-v1:${me.id}`, {})[id]?.value) || 0;
+  /** A contact's interval: only known choices, and at most ten changes a minute from any contact. */
+  function rememberPeerRotation(id, value) {
+    if (!window.Signal.ROTATION_CHOICES.includes(value)) return;
+    const all = readJson(`rotation-peer-v1:${me.id}`, {}), previous = all[id], now = Date.now();
+    if (previous?.value === value) return;
+    const changes = (previous?.changes || []).filter(time => now - time < 60000);
+    if (changes.length >= 10) return;
+    all[id] = { value, changes: [...changes, now] }; writeJson(`rotation-peer-v1:${me.id}`, all);
+  }
+  const effectiveRotation = id => window.Signal.rotationInterval(myRotation(), peerRotation(id));
+  const every = ms => ({ 86400000: 'day', 604800000: 'week', 2592000000: '30 days' })[ms];
+  /** Starts fresh session keys with a new handshake. The pinned identity (security code) is untouched. */
+  async function rotateSession(contact, reason) {
+    const conversationId = await pairId(contact.id), id = crypto.randomUUID();
+    await box.rotate(contact.id);
+    await sendControl(contact, { v: 1, type: 'rotate', id, reason });
+    await window.ChatStore.note(conversationId, id, reason === 'manual' ? '🔄 Secure session reset by you' : `🔄 Keys rotated on schedule (every ${every(effectiveRotation(contact.id))})`);
+    await tellPolicy(contact);
+  }
+  async function rotateIfDue(contact) {
+    const interval = effectiveRotation(contact.id), info = interval ? await box.sessionInfo(contact.id) : null;
+    if (info && Date.now() - info.startedAt >= interval) await rotateSession(contact, 'scheduled');
+  }
+  /** Tells a contact our interval once per session, and again whenever it changes. */
+  async function tellPolicy(contact, force = false) {
+    const told = readJson(`rotation-told-v1:${me.id}`, {}), mine = myRotation(), info = await box.sessionInfo(contact.id);
+    if (!force && info && told[contact.id] === `${mine}|${info.sid}`) return;
+    await sendControl(contact, { v: 1, type: 'policy', id: crypto.randomUUID(), rotateEveryMs: mine });
+    const after = await box.sessionInfo(contact.id);
+    told[contact.id] = `${mine}|${after?.sid}`; writeJson(`rotation-told-v1:${me.id}`, told);
+  }
+  $('rotation-every').onchange = async () => {
+    const value = Number($('rotation-every').value);
+    if (!window.Signal?.ROTATION_CHOICES.includes(value) || !me) return;
+    writeJson(`rotation-v1:${me.id}`, value);
+    say('security-status', value ? `Chat keys rotate every ${every(value)}, or sooner if a contact chose a shorter interval.` : 'Automatic rotation is off. A contact\'s shorter interval still applies to your chat with them.');
+    if (!box || inactive) return;
+    for (const contact of contacts.filter(value => value.state === 'mutual')) if (await box.sessionInfo(contact.id)) tellPolicy(contact, true).catch(() => {});
+  };
+  $('conv-rotate').onclick = () => { $('conv-menu').open = false; $('rotate-confirm').hidden = false; $('rotate-yes').focus(); };
+  $('rotate-cancel').onclick = () => { $('rotate-confirm').hidden = true; };
+  $('rotate-yes').onclick = async () => {
+    $('rotate-confirm').hidden = true;
+    const contact = current && contactById(current.id);
+    if (!contact || !box) return;
+    if (inactive) { App.chatStatus('Messaging is active on another device. Move it here first.'); return; }
+    try { await rotateSession(contact, 'manual'); App.chatStatus('Secure session reset. New keys are in use for this chat.'); }
+    catch (error) { App.chatStatus(error.code === 'identity-blocked' ? `${contact.username}'s security code changed. Review it before resetting.` : `Could not reset: ${error.message}`); }
+    App.refreshHistory(); render();
+  };
+  $('identity-reset').onclick = () => { $('identity-confirm').hidden = false; $('identity-cancel').focus(); };
+  $('identity-cancel').onclick = () => { $('identity-confirm').hidden = true; };
+  $('identity-yes').onclick = async () => {
+    $('identity-confirm').hidden = true;
+    if (!box || !me) return;
+    try {
+      await box.resetIdentity();
+      writeJson(`rotation-told-v1:${me.id}`, {});
+      await publishKeys(true); // Takeover semantics: new identity, signed prekey and 100 one-time prekeys.
+      say('security-status', 'New identity keys are in use. Your contacts will see that your security code changed.');
+    } catch (error) { say('security-status', `Could not generate new keys: ${error.message}`); }
+  };
 
   // ---------- Security codes ----------
   async function checkIdentity(contactId) {
@@ -315,6 +391,8 @@
       say('safety-state', safety.verified ? 'Verified on this device.' : safety.changed ? 'This code changed recently. Compare it before trusting new messages.' : 'Not verified yet. Compare these 60 digits with the ones on their screen, in person or on a call. If they match, no one — not even this server — can read your messages.');
       $('safety-verify').textContent = safety.verified ? 'Clear verification' : 'Mark as verified';
       $('safety-accept').hidden = !safety.blocked;
+      const interval = effectiveRotation(contact.id), mine = myRotation(), theirs = peerRotation(contact.id);
+      say('safety-rotation', interval ? `Chat keys rotate every ${every(interval)} (${mine === theirs ? 'both your settings' : interval === mine ? 'your setting' : 'their setting'}).` : 'Chat keys rotate when either of you resets the secure session. Automatic rotation is off for both of you.');
       $('safety').hidden = false; $('safety-close').focus();
     } catch (error) { App.chatStatus(error.status === 404 ? `${contact.username} has not set up encrypted messaging yet.` : error.message); }
   }

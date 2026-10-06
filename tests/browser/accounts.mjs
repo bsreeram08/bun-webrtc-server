@@ -116,6 +116,54 @@ try {
   await alice.waitForFunction(() => document.getElementById('chat-log').textContent.includes('still in sync'), null, { timeout: 15000 });
   step('out-of-order and duplicated envelopes were shown once each, in order, and the ratchet kept working');
 
+  // Manual key rotation from inside the chat: a fresh handshake, same security code, messages keep flowing.
+  const rotShot = async (page, name) => { if (shots) { await page.waitForTimeout(400); await page.screenshot({ path: join(shots, `rot-${name}.png`) }); } };
+  await alice.click('#conv-menu summary'); await rotShot(alice, '1-menu');
+  await alice.click('#conv-rotate'); await visible(alice, '#rotate-confirm'); await rotShot(alice, '2-confirm');
+  await alice.click('#rotate-yes');
+  await alice.waitForFunction(() => document.getElementById('chat-log').textContent.includes('Secure session reset by you'), null, { timeout: 15000 });
+  await bob.waitForFunction(() => document.getElementById('chat-log').textContent.includes('Secure session reset by alice'), null, { timeout: 15000 });
+  await alice.fill('#chat-input', 'after the reset'); await alice.click('#chat-send');
+  await bob.waitForFunction(() => document.getElementById('chat-log').textContent.includes('after the reset'), null, { timeout: 15000 });
+  await bob.fill('#chat-input', 'new keys work'); await bob.click('#chat-send');
+  await alice.waitForFunction(() => document.getElementById('chat-log').textContent.includes('new keys work'), null, { timeout: 15000 });
+  await rotShot(alice, '3-system-line'); await rotShot(bob, '3-system-line-peer');
+  const sameCode = await safety(alice); await alice.click('#safety-close');
+  if (sameCode !== codeA) throw new Error('A session reset changed the security code');
+  step('manual reset: new session keys, both sides show the reset line, messages flow both ways, security code unchanged');
+
+  // Schedules: alice picks daily, bob weekly; the shorter (daily) applies on both sides.
+  await alice.click('#conv-back'); await alice.click('#account-menu summary'); await alice.click('#account-settings');
+  await alice.selectOption('#rotation-every', '86400000');
+  await alice.locator('#rotation-every').scrollIntoViewIfNeeded(); await rotShot(alice, '4-settings');
+  await bob.evaluate(() => { const select = document.getElementById('rotation-every'); select.value = '604800000'; select.dispatchEvent(new Event('change')); });
+  await alice.evaluate(() => { document.getElementById('settings').open = false; });
+  await alice.click('#contact-list .contact.mutual .row-button'); await visible(alice, '#conv-head');
+  const rotationText = async page => { await page.click('#conv-menu summary'); await page.click('#conv-safety'); await visible(page, '#safety'); const text = await page.textContent('#safety-rotation'); await page.click('#safety-close'); return text; };
+  await alice.waitForFunction(() => true);
+  let [ruleA, ruleB] = ['', ''];
+  for (let tries = 0; tries < 30 && !(ruleA.includes('every day (your setting)') && ruleB.includes('every day (their setting)')); tries++) {
+    await alice.waitForTimeout(300); [ruleA, ruleB] = [await rotationText(alice), await rotationText(bob)];
+  }
+  if (!ruleA.includes('every day (your setting)') || !ruleB.includes('every day (their setting)')) throw new Error(`Rotation policy not shared: ${ruleA} / ${ruleB}`);
+  await alice.click('#conv-menu summary'); await alice.click('#conv-safety'); await visible(alice, '#safety'); await rotShot(alice, '5-safety-policy'); await alice.click('#safety-close');
+  step('alice daily, bob weekly: both chats show the shorter interval, one day');
+
+  // A session older than the interval rotates before the next message goes out.
+  await alice.evaluate(async () => {
+    const me = (await (await fetch('/api/me')).json()).user.id, peer = (await (await fetch('/api/contacts')).json()).contacts.find(contact => contact.username === 'bob').id;
+    const db = await new Promise((ok, fail) => { const request = indexedDB.open(`webrtc-bun-signal-v1-${me}`, 1); request.onsuccess = () => ok(request.result); request.onerror = fail; });
+    const run = (mode, work) => new Promise((ok, fail) => { const tx = db.transaction('kv', mode), request = work(tx.objectStore('kv')); tx.oncomplete = () => ok(request.result); tx.onerror = fail; });
+    const record = await run('readonly', store => store.get(`sessions:${peer}`));
+    record.list[record.active].startedAt = Date.now() - 2 * 86400000;
+    await run('readwrite', store => store.put(record, `sessions:${peer}`));
+    db.close();
+  });
+  await alice.fill('#chat-input', 'sent after a scheduled rotation'); await alice.click('#chat-send');
+  await alice.waitForFunction(() => document.getElementById('chat-log').textContent.includes('Keys rotated on schedule (every day)'), null, { timeout: 15000 });
+  await bob.waitForFunction(() => { const text = document.getElementById('chat-log').textContent; return text.includes('Keys rotated on schedule by alice') && text.includes('sent after a scheduled rotation'); }, null, { timeout: 15000 });
+  step('a session older than the shared interval rotated automatically before the next message');
+
   // Key change: bob's device loses its keys (a reinstall). Alice verified him, so sending pauses.
   await bob.evaluate(async () => { const id = (await (await fetch('/api/me')).json()).user.id; await new Promise(done => { const request = indexedDB.deleteDatabase(`webrtc-bun-signal-v1-${id}`); request.onsuccess = request.onerror = request.onblocked = done; }); });
   await bob.reload(); await visible(bob, '#chats');
@@ -129,12 +177,16 @@ try {
   await shot(alice, 'e2e-3-key-change');
   // Before alice accepts the new code, the new identity cannot burn her history.
   await bob.click('#contact-list .contact.mutual .row-button');
+  await bob.evaluate(() => { const select = document.getElementById('rotation-every'); select.value = '0'; select.dispatchEvent(new Event('change')); });
+  await bob.click('#conv-menu summary'); await bob.click('#conv-rotate'); await visible(bob, '#rotate-confirm'); await bob.click('#rotate-yes');
   await bob.click('#conv-menu summary'); await bob.click('#conv-burn'); await visible(bob, '#burn-confirm'); await bob.click('#burn-confirm-yes');
   await bob.waitForFunction(() => /Burned on this device/.test(document.getElementById('chat-status').textContent), null, { timeout: 15000 });
   await alice.waitForTimeout(2000);
   if (!(await logText(alice)).includes('sealed end to end')) throw new Error('An unaccepted identity burned the conversation');
+  if ((await logText(alice)).includes('Secure session reset by bob')) throw new Error('An unaccepted identity reset the session');
+  if (!(await rotationText(alice)).includes('every day (your setting)')) throw new Error('An unaccepted identity changed the rotation policy');
   await bob.click('#conv-back');
-  step('a burn from the unaccepted new identity was ignored');
+  step('a burn, a session reset and a policy change from the unaccepted new identity were all ignored');
   await alice.click('#key-banner-review'); await visible(alice, '#safety');
   if ((await alice.textContent('#safety-number')) === codeA) throw new Error('Safety number did not change');
   await alice.click('#safety-accept');
@@ -142,6 +194,23 @@ try {
   await bob.click('#contact-list .contact.mutual .row-button');
   await bob.waitForFunction(() => document.getElementById('chat-log').textContent.includes('hello new device'), null, { timeout: 15000 });
   step('a new identity raised the security-code banner, paused sending to the verified contact, and messaging resumed after review');
+
+  // Alice generates new identity keys on purpose: bob sees her security code change and reviews it.
+  const aliceCodeBefore = await safety(bob); await bob.click('#safety-close');
+  await alice.click('#conv-back'); await alice.click('#account-menu summary'); await alice.click('#account-settings');
+  await alice.click('#identity-reset'); await visible(alice, '#identity-confirm'); await rotShot(alice, '6-identity-confirm');
+  await alice.click('#identity-yes');
+  await alice.waitForFunction(() => /New identity keys are in use/.test(document.getElementById('security-status').textContent), null, { timeout: 15000 });
+  await bob.waitForFunction(() => !document.getElementById('key-banner').hidden, null, { timeout: 15000 });
+  await bob.click('#key-banner-review'); await visible(bob, '#safety');
+  if ((await bob.textContent('#safety-number')) === aliceCodeBefore) throw new Error('Identity regeneration did not change the security code');
+  await bob.click('#safety-accept');
+  await alice.evaluate(() => { document.getElementById('settings').open = false; });
+  await alice.click('#contact-list .contact.mutual .row-button'); await visible(alice, '#conv-head');
+  // Alice's pin for bob is unchanged; her new identity starts a fresh session with him.
+  await alice.fill('#chat-input', 'from my new keys'); await alice.click('#chat-send');
+  await bob.waitForFunction(() => document.getElementById('chat-log').textContent.includes('from my new keys'), null, { timeout: 15000 });
+  step('own identity regeneration: bob saw alice\'s security code change, accepted it, and messages flow');
 
   // Burn through the mailbox: both copies go.
   await alice.click('#conv-menu summary'); await alice.click('#conv-burn'); await visible(alice, '#burn-confirm'); await alice.click('#burn-confirm-yes');

@@ -22,7 +22,7 @@
     <button id="conv-voice" class="icon-button" type="button" aria-label="Voice call"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></svg></button>
     <button id="conv-video" class="icon-button" type="button" aria-label="Video call"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg></button>
     <details id="conv-menu" class="menu"><summary aria-label="Conversation options"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></summary>
-      <div class="menu-panel"><button id="conv-safety" type="button">Security code</button><button id="conv-theme" type="button">Chat theme</button><button id="conv-burn" class="danger-text" type="button" disabled>Burn conversation</button><button id="conv-remove" class="danger-text" type="button">Remove contact</button></div></details>
+      <div class="menu-panel"><button id="conv-safety" type="button">Security code</button><button id="conv-rotate" type="button">Reset secure session</button><button id="conv-theme" type="button">Chat theme</button><button id="conv-burn" class="danger-text" type="button" disabled>Burn conversation</button><button id="conv-remove" class="danger-text" type="button">Remove contact</button></div></details>
   </header>
   <div id="key-banner" class="key-banner" role="alert" hidden>
     <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 8v4M12 16h.01"/></svg>
@@ -148,6 +148,7 @@
     <h2 id="safety-title">Security code</h2>
     <p id="safety-number" class="safety-number"></p>
     <p id="safety-state"></p>
+    <p id="safety-rotation" class="note"></p>
     <div class="dialog-actions"><button id="safety-close" type="button">Close</button><button id="safety-accept" type="button" hidden>Accept new code</button><button id="safety-verify" class="primary" type="button">Mark as verified</button></div>
   </div></div>
 
@@ -157,6 +158,18 @@
     <h3>Accent</h3><div class="accent-row"><label for="theme-accent" class="sr-only">Accent colour</label><input id="theme-accent" type="color" value="#a1efce"><span class="note">Bubbles, ticks and buttons follow it, kept readable.</span><button id="theme-accent-reset" class="link" type="button" hidden>Reset</button></div>
     <h3 id="theme-walls-label">Wallpaper</h3><div id="theme-walls" class="walls" role="radiogroup" aria-labelledby="theme-walls-label"></div>
     <div class="dialog-actions"><button id="theme-done" class="primary" type="button">Done</button></div>
+  </div></div>
+
+  <div id="rotate-confirm" class="dialog" role="alertdialog" aria-labelledby="rotate-title" hidden><div class="dialog-card">
+    <h2 id="rotate-title">Reset secure session?</h2>
+    <p>Starts fresh encryption keys for this chat with a new handshake. Your security code stays the same, and messages already on their way still arrive.</p>
+    <div class="dialog-actions"><button id="rotate-cancel" type="button">Cancel</button><button id="rotate-yes" class="primary" type="button">Reset</button></div>
+  </div></div>
+
+  <div id="identity-confirm" class="dialog" role="alertdialog" aria-labelledby="identity-title" hidden><div class="dialog-card">
+    <h2 id="identity-title">Generate new identity keys?</h2>
+    <p>Every contact will see that your security code changed, and contacts who verified you must verify you again before they can send to you. Only do this if you think this device's keys were exposed.</p>
+    <div class="dialog-actions"><button id="identity-cancel" type="button">Cancel</button><button id="identity-yes" class="danger" type="button">Generate new keys</button></div>
   </div></div>
 
   <div id="remove-confirm" class="dialog" role="alertdialog" aria-labelledby="remove-title" hidden><div class="dialog-card">
@@ -188,6 +201,15 @@
       <label class="toggle"><input id="notify-toggle" type="checkbox"> Notify me about messages and calls on this device</label>
       <label class="toggle"><input id="ring-silent" type="checkbox"> Silent: no ringtone or vibration</label>
       <p id="notify-status" class="note" role="status" aria-live="polite"></p>
+    </div>
+    <div class="account-only">
+      <h3>Security</h3>
+      <label for="rotation-every">Rotate chat keys automatically</label>
+      <select id="rotation-every"><option value="0">Off</option><option value="86400000">Every day</option><option value="604800000">Every week</option><option value="2592000000">Every 30 days</option></select>
+      <p class="note">Each chat starts fresh keys on this schedule. If you and a contact choose differently, the shorter one applies to your chat.</p>
+      <p id="security-status" class="note" role="status" aria-live="polite"></p>
+      <p class="note">New identity keys are only for a device you think was exposed: every contact sees your security code change.</p>
+      <button id="identity-reset" class="danger-text" type="button">Generate new identity keys</button>
     </div>
     <h3>Appearance</h3>
     <p>Themes, accent colour and chat wallpaper. Stored on this device only.</p>

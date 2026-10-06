@@ -59,15 +59,17 @@ function tickIcon() {
   return svg;
 }
 function describe(record, flagged) {
+  if (record.direction === 'system') return `${record.text} · ${new Date(record.createdAt).toLocaleString()}`;
   const delivery = { queued: 'Queued on this device', sent: 'Sent · delivery unconfirmed', delivered: 'Delivered to device', uncertain: 'Restored · delivery unconfirmed' }[record.status];
   const detail = `${record.direction === 'outgoing' ? 'You' : peerName === 'the other participant' ? 'Other participant' : peerName} · ${new Date(record.createdAt).toLocaleString()} · ${delivery}${record.expiresAt ? ' · Disappears ' + new Date(record.expiresAt).toLocaleString() : ''}`;
   return flagged ? `${detail} · Sent under a new security code` : detail;
 }
 function paintRow(row, record) {
   // Messages that arrived under a changed security code stay marked until the code is reviewed.
-  const flagged = Boolean(window.App?.flagged?.(record)), key = `${record.status}|${flagged}`;
+  const flagged = Boolean(window.App?.flagged?.(record)), key = `${record.status}|${flagged}|${record.createdAt}|${record.text}`;
   if (row.dataset.paint === key) return;
   row.dataset.paint = key; row.dataset.status = record.status; row.classList.toggle('flagged', flagged);
+  row.querySelector('.message-text').textContent = record.text; // System lines can be updated in place.
   const label = describe(record, flagged); row.title = label;
   const meta = row.querySelector('.message-meta'); meta.setAttribute('aria-label', label);
   meta.querySelector('.meta-text').textContent = `${flagged ? '⚠ ' : ''}${record.expiresAt ? '⏱ ' : ''}${clock(record.createdAt)}${record.direction === 'outgoing' && record.status === 'uncertain' ? ' ?' : ''}`;
@@ -530,6 +532,8 @@ $('hangup').onclick = () => endRoom('Call ended.');
 $('burn').onclick = () => { $('menu').open = false; $('burn-confirm').hidden = false; };
 $('settings-open').onclick = () => { $('menu').open = false; $('settings').open = true; view('panel', 'settings'); };
 $('settings-close').onclick = () => view('panel', '');
+// Collapsing Settings (e.g. from the chat list) must also drop its sheet, or it stays over the next chat.
+$('settings').addEventListener('toggle', () => { if (!$('settings').open) view('panel', ''); });
 const toggleChat = open => {
   view('sheet', open ? 'open' : ''); $('chat-toggle').setAttribute('aria-expanded', String(open));
   if (open) { const log = $('chat-log'); log.scrollTop = log.scrollHeight; }

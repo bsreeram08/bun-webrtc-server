@@ -217,6 +217,10 @@ body[data-state="chat"] #settings { position: fixed; z-index: 40; inset: auto 0 
 .safety-number { font: 600 20px/1.6 ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: .04em; color: var(--text) !important; text-align: center; word-spacing: .4em; margin: 12px 0 !important; }
 #safety .dialog-actions { flex-wrap: wrap; }
 #chat-log li.flagged { outline: 1px dashed var(--warn); }
+/* Local system lines, e.g. a secure session reset: centred, quiet, no bubble. */
+#chat-log li.system { align-self: center; max-width: 92%; background: transparent; color: var(--muted); border-radius: 999px; border: 1px solid var(--line); padding: 4px 12px; font-size: .82rem; text-align: center; box-shadow: none; }
+#chat-log li.system .message-meta { display: inline; margin-left: 6px; }
+#chat-log li.system .message-text { display: inline; }
 .contact time { align-self: flex-start; color: var(--muted); font-size: 12px; padding-top: 2px; font-variant-numeric: tabular-nums; }
 .contact > button:not(.row-button) { padding: 7px 12px; font-size: 14px; border-radius: 18px; position: relative; z-index: 1; }
 .row-button { position: absolute; inset: 0; background: transparent; border: 0; border-radius: 12px; padding: 0; }
