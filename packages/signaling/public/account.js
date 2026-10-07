@@ -92,19 +92,25 @@
     // silently drops site data (private tabs, in-app browsers) is named instead of looping on new keys.
     try { await navigator.storage?.persist?.(); } catch {}
     const hooks = { identityChanged: contactId => identityChanged(contactId) };
-    // Opt-in WebAssembly core (core.js): the same protocol from crates/chatcore, with its own sealed key store.
-    // Its keys are separate from signal.js's, so turning it on for an existing account is a new device here:
-    // the active-device banner offers "Use this device instead". (Migration of existing keys comes later.)
-    if (window.Core?.enabled() && window.Core.supported()) {
+    // Which core this account uses on this device: a local setting (Settings → Advanced), never a link.
+    // The experimental WebAssembly core (core.js) runs the same protocol from crates/chatcore with its own
+    // sealed key store; switching is an explicit reset of this device's keys (see core-backend-switch).
+    backendName = window.Core?.supported() ? await window.Core.backend(user.id) : 'signal';
+    announceBackend = window.Core?.supported() ? window.Core.guard(user.id, backendName, () => location.reload()) : () => {};
+    if (backendName === 'wasm') {
       keysLost = false;
       box = window.Core.box(user.id, hooks);
     } else {
       try { keysLost = !await store.get('identity') && localStorage.getItem(`keys-held-v1:${user.id}`) === '1'; } catch { keysLost = false; }
       box = window.Signal.box(store, hooks);
     }
+    showBackend();
     flagged = new Set(await store.get('flagged') || []);
     flagged.store = store;
-    try { await publishKeys(); } catch (error) { say('chats-status', `Could not publish encryption keys: ${error.message}`); }
+    // After a confirmed switch, the new core's fresh keys take over this account (the user chose to reset them).
+    let switched = false;
+    try { switched = localStorage.getItem(`core-switch-takeover-v1:${user.id}`) === '1'; localStorage.removeItem(`core-switch-takeover-v1:${user.id}`); } catch {}
+    try { await publishKeys(switched); } catch (error) { say('chats-status', `Could not publish encryption keys: ${error.message}`); }
     return true;
   }
   /** One device per account holds messaging. Another device or browser (e.g. Safari vs the Home Screen app)
@@ -423,6 +429,36 @@
     catch (error) { App.chatStatus(error.code === 'identity-blocked' ? `${contact.username}'s security code changed. Review it before resetting.` : `Could not reset: ${error.message}`); }
     App.refreshHistory(); render();
   };
+  // ---------- Encryption core (Settings → Advanced) ----------
+  let backendName = 'signal', announceBackend = () => {};
+  function showBackend() {
+    const wasm = backendName === 'wasm';
+    say('core-backend-state', wasm ? 'This device uses the experimental WebAssembly core.' : 'This device uses the standard browser core.');
+    say('core-backend-switch', wasm ? 'Go back to the standard core' : 'Use the experimental encryption core');
+    $('core-backend-switch').disabled = !window.Core?.supported();
+  }
+  /** Switches only with nothing to lose (no keys here yet) or after the user confirmed resetting this device's keys. */
+  async function switchBackend() {
+    $('core-confirm').hidden = true;
+    const next = backendName === 'wasm' ? 'signal' : 'wasm', id = me.id;
+    if (await window.Core.hasKeys(id, backendName)) {
+      // The keys being left behind are deleted, so switching back later can never resurrect a stale identity.
+      await new Promise(done => { const request = indexedDB.deleteDatabase(backendName === 'wasm' ? `webrtc-bun-core-v1-${id}` : `webrtc-bun-signal-v1-${id}`); request.onsuccess = request.onerror = request.onblocked = done; });
+      try { localStorage.setItem(`core-switch-takeover-v1:${id}`, '1'); } catch {}
+    }
+    window.Core.setBackend(id, next);
+    announceBackend(next); // Other tabs of this account reload onto the new core: never two cores at once.
+    location.reload();
+  }
+  $('core-backend-switch').onclick = async () => {
+    if (!me || !window.Core?.supported()) return;
+    // A device with no keys in its current core has nothing to reset: switch straight away.
+    if (!await window.Core.hasKeys(me.id, backendName)) { await switchBackend(); return; }
+    $('core-confirm').hidden = false; $('core-confirm-cancel').focus();
+  };
+  $('core-confirm-cancel').onclick = () => { $('core-confirm').hidden = true; };
+  $('core-confirm-yes').onclick = () => switchBackend();
+
   $('identity-reset').onclick = () => { $('identity-confirm').hidden = false; $('identity-cancel').focus(); };
   $('identity-cancel').onclick = () => { $('identity-confirm').hidden = true; };
   $('identity-yes').onclick = async () => {

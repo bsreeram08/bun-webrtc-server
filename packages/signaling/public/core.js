@@ -125,9 +125,58 @@
   }
 
   const supported = () => typeof WebAssembly === 'object' && typeof Worker === 'function' && typeof BroadcastChannel === 'function' && Boolean(globalThis.indexedDB && crypto?.subtle);
-  function enabled() {
-    try { if (new URLSearchParams(location.search).get('core') === 'wasm') return true; } catch {}
-    try { return localStorage.getItem('core-backend') === 'wasm'; } catch { return false; }
+
+  // ---------- Which core an account uses on this device ----------
+  // A local, per-account setting (Settings → Advanced). Nothing a link can carry selects it: a crafted
+  // ?core=… URL would otherwise move someone onto an empty key store (a new identity for every contact).
+  // Test runs may override it, but only when the server says test flags are on (ALLOW_TEST_FLAGS=1 on a
+  // localhost origin); calls.sreerams.in answers 404.
+  const PREF = userId => `core-backend-v1:${userId}`;
+  let testFlags = null;
+  async function testFlagsOn() {
+    if (testFlags === null) { try { testFlags = (await fetch('/test-flags.json', { cache: 'no-store' })).ok; } catch { testFlags = false; } }
+    return testFlags;
   }
-  window.Core = Object.freeze({ box, supported, enabled });
+  /** 'wasm' or 'signal' for this account on this device. */
+  async function backend(userId) {
+    let chosen = null;
+    try { chosen = localStorage.getItem(PREF(userId)); } catch {}
+    if (chosen === 'wasm' || chosen === 'signal') return chosen; // The user's own choice always wins.
+    if (await testFlagsOn()) {
+      try { if (new URLSearchParams(location.search).get('core') === 'wasm' || localStorage.getItem('core-backend-test') === 'wasm') return 'wasm'; } catch {}
+    }
+    return 'signal';
+  }
+  function setBackend(userId, value) {
+    try { localStorage.setItem(PREF(userId), value === 'wasm' ? 'wasm' : 'signal'); } catch {}
+  }
+  /** Whether this device holds keys for the account in the given core (read without opening a writer). */
+  function hasKeys(userId, which) {
+    const name = which === 'wasm' ? `webrtc-bun-core-v1-${userId}` : `webrtc-bun-signal-v1-${userId}`;
+    return new Promise(resolve => {
+      const request = indexedDB.open(name);
+      request.onerror = () => resolve(false);
+      // A database that doesn't exist must not be created here (an empty version-1 database would stop its
+      // owner from creating its object store later): abort the upgrade, which reports "no keys".
+      request.onupgradeneeded = () => request.transaction.abort();
+      request.onsuccess = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains('kv')) { db.close(); return resolve(false); }
+        const read = db.transaction('kv').objectStore('kv').getKey('identity');
+        read.onsuccess = () => { db.close(); resolve(read.result !== undefined); };
+        read.onerror = () => { db.close(); resolve(false); };
+      };
+    });
+  }
+  /**
+   * Never two cores for one account at once: every tab announces the core it runs; a tab that hears a
+   * different one reloads (and reads the current setting). Returns a function to announce a switch.
+   */
+  function guard(userId, mine, onConflict) {
+    const channel = new BroadcastChannel(`chatcore-backend:${userId}`);
+    channel.onmessage = event => { if (event.data?.backend && event.data.backend !== mine) onConflict(event.data.backend); };
+    channel.postMessage({ backend: mine });
+    return next => channel.postMessage({ backend: next });
+  }
+  window.Core = Object.freeze({ box, supported, backend, setBackend, hasKeys, guard });
 })();

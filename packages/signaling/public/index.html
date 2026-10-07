@@ -181,6 +181,12 @@
     <div class="dialog-actions"><button id="identity-cancel" type="button">Cancel</button><button id="identity-yes" class="danger" type="button">Generate new keys</button></div>
   </div></div>
 
+  <div id="core-confirm" class="dialog" role="alertdialog" aria-labelledby="core-confirm-title" hidden><div class="dialog-card">
+    <h2 id="core-confirm-title">Switch encryption core?</h2>
+    <p>This resets your keys on this device. Every contact will see that your security code changed, and messages still waiting for this device's old keys can't be read.</p>
+    <div class="dialog-actions"><button id="core-confirm-cancel" type="button">Cancel</button><button id="core-confirm-yes" class="danger" type="button">Reset keys and switch</button></div>
+  </div></div>
+
   <div id="remove-confirm" class="dialog" role="alertdialog" aria-labelledby="remove-title" hidden><div class="dialog-card">
     <h2 id="remove-title">Remove this contact?</h2>
     <p>You stop seeing each other online and can no longer call or message until one of you adds the other again. Messages on this device stay.</p>
@@ -220,6 +226,12 @@
       <p id="security-status" class="note" role="status" aria-live="polite"></p>
       <p class="note">New identity keys are only for a device you think was exposed: every contact sees your security code change.</p>
       <button id="identity-reset" class="danger-text" type="button">Generate new identity keys</button>
+      <div class="advanced-settings">
+        <h4>Advanced</h4>
+        <p class="note">Experimental encryption core: the same protocol, run by the app's WebAssembly engine (the code the phone apps use) instead of the browser script. Switching on a device that already has keys resets your keys on this device.</p>
+        <p id="core-backend-state" class="note" role="status" aria-live="polite"></p>
+        <button id="core-backend-switch" type="button">Use the experimental encryption core</button>
+      </div>
     </div>
     <div class="account-only emoji-settings">
       <h3>Custom emoji</h3>

@@ -15,7 +15,8 @@ const playwright = await import(process.env.PLAYWRIGHT_MODULE || 'playwright-cor
 const port = Number(process.env.TEST_PORT || 3127), origin = `http://localhost:${port}`;
 const dataDir = process.env.DATA_DIR || mkdtempSync(join(tmpdir(), 'accounts-e2e-'));
 const shots = process.env.SCREENSHOT_DIR;
-const env = { ...process.env, PORT: String(port), ADMIN_TOKEN: randomBytes(32).toString('hex'), PUBLIC_ORIGIN: origin, DATA_DIR: dataDir };
+// ALLOW_TEST_FLAGS lets CORE=wasm pick the WebAssembly core without the Settings switch (loopback origins only).
+const env = { ...process.env, PORT: String(port), ADMIN_TOKEN: randomBytes(32).toString('hex'), PUBLIC_ORIGIN: origin, DATA_DIR: dataDir, ALLOW_TEST_FLAGS: '1' };
 const server = spawn('bun', ['--no-env-file', 'packages/signaling/server.ts'], { cwd: root, env, stdio: ['ignore', 'pipe', 'inherit'] });
 process.on('exit', () => server.kill());
 for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => process.exit(1));
@@ -35,7 +36,7 @@ const serverBytes = () => Buffer.concat(readdirSync(dataDir, { withFileTypes: tr
 async function person() {
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 });
   await context.grantPermissions(['camera', 'microphone'], { origin });
-  if (wasm) await context.addInitScript(() => localStorage.setItem('core-backend', 'wasm'));
+  if (wasm) await context.addInitScript(() => localStorage.setItem('core-backend-test', 'wasm'));
   const page = await context.newPage(); pages.push(page);
   page.on('pageerror', error => { throw error; }); page.on('console', message => { if (message.text().includes('JOINDEBUG')) console.log(message.text()); });
   const cdp = await context.newCDPSession(page);
@@ -353,6 +354,23 @@ try {
   await alice.click('#signin'); await visible(alice, '#chats');
   if ((await alice.textContent('#me-name')) !== '@alice') throw new Error('Passkey sign-in returned the wrong user');
   step('signed out, then back in with the passkey');
+
+  // Settings → Advanced: switching the encryption core on a device that has keys needs an explicit reset.
+  const from = wasm ? 'wasm' : 'signal', to = wasm ? 'signal' : 'wasm';
+  const keysIn = which => alice.evaluate(async which => window.Core.hasKeys((await (await fetch('/api/me')).json()).user.id, which), which);
+  if (!await keysIn(from)) throw new Error(`alice has no keys in the ${from} core before switching`);
+  await alice.click('#account-menu summary'); await alice.click('#account-settings');
+  await alice.locator('#core-backend-switch').scrollIntoViewIfNeeded();
+  await alice.click('#core-backend-switch'); await visible(alice, '#core-confirm');
+  await alice.click('#core-confirm-cancel');
+  if (!await alice.isHidden('#core-confirm') || !await keysIn(from)) throw new Error('Cancelling the switch changed something');
+  await alice.click('#core-backend-switch'); await visible(alice, '#core-confirm');
+  await Promise.all([alice.waitForEvent('load'), alice.click('#core-confirm-yes')]);
+  await visible(alice, '#chats');
+  await alice.waitForFunction(() => document.getElementById('device-banner').hidden, null, { timeout: 15000 });
+  await alice.waitForFunction(async which => window.Core.hasKeys((await (await fetch('/api/me')).json()).user.id, which), to, { timeout: 15000 });
+  if (await keysIn(from)) throw new Error(`the ${from} core still holds keys after the switch`);
+  step(`switching the encryption core (${from} → ${to}) needed a confirmed reset; the new core took over with fresh keys`);
   console.log('Accounts end-to-end check passed.');
 } catch (error) {
   console.error('Page state:', JSON.stringify(await diagnose(), null, 1));

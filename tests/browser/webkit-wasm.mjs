@@ -69,6 +69,14 @@ for (const name of ['webkit', 'chromium']) {
   if (afterHandover.dh !== first.dh) throw new Error(`${name}: identity changed after the leader handover`);
   step(`${name}: two tabs — one writer, the follower works through it and takes over when the leader closes`);
 
+  // Never two cores for one account: a tab running one core hears another tab start the other, and yields.
+  const signalTab = await context.newPage();
+  await signalTab.goto(origin); await signalTab.waitForFunction(() => window.Core?.supported());
+  await signalTab.evaluate(() => { window.__yielded = null; window.Core.guard('carol', 'signal', next => { window.__yielded = next; }); });
+  await followerTab.evaluate(() => window.Core.guard('carol', 'wasm', () => {}));
+  await signalTab.waitForFunction(() => window.__yielded === 'wasm', null, { timeout: 5000 });
+  step(`${name}: a tab on one core yields when another tab of the account starts the other core`);
+
   if (errors.length) throw new Error(`${name}: page errors: ${errors.join('; ')}`);
   await browser.close();
 }

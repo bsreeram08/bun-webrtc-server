@@ -47,6 +47,9 @@ export type SignalingOptions = {
     emojiImportHosts?: string[];
     emojiFetcher?: Fetcher;
     emojiResolver?: Resolver;
+    /** Test-only switches for the browser suites (e.g. choosing the encryption core). Honoured only on a
+     *  loopback origin, so a production server can never expose them even if misconfigured. */
+    allowTestFlags?: boolean;
 };
 export type NativeApps = { appleAppIds?: string[]; androidPackage?: string; androidCertSha256?: string[]; androidApkKeyHashes?: string[] };
 
@@ -84,6 +87,7 @@ export function wellKnown(apps: NativeApps = {}) {
 export function startSignaling(options: SignalingOptions) {
     if (options.adminToken.length < 32) throw new Error('ADMIN_TOKEN must contain at least 32 characters');
     const origin = new URL(options.origin);
+    const testFlags = Boolean(options.allowTestFlags) && ['localhost', '127.0.0.1', '[::1]'].includes(origin.hostname);
     if (origin.origin !== options.origin || !['http:', 'https:'].includes(origin.protocol)) throw new Error('PUBLIC_ORIGIN must be an exact HTTP(S) origin');
     if (origin.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(origin.hostname)) throw new Error('Public deployments require HTTPS');
     const rooms = new Map<string, Room>();
@@ -168,6 +172,7 @@ export function startSignaling(options: SignalingOptions) {
                 if (Number(declared) > cap) return json({ error: 'Request too large' }, 413);
             }
             if (request.method === 'GET' && url.pathname === '/health') return json({ status: 'ok' });
+            if (request.method === 'GET' && url.pathname === '/test-flags.json') return testFlags ? json({ testFlags: true }) : json({ error: 'Not found' }, 404);
             // Fetched by Apple's CDN and Google's verifier: exact JSON, no redirect, 404 until configured.
             if (request.method === 'GET' && (url.pathname === '/.well-known/apple-app-site-association' || url.pathname === '/.well-known/assetlinks.json')) {
                 const file = url.pathname.endsWith('.json') ? associations.android : associations.apple;
@@ -314,7 +319,7 @@ export function startSignaling(options: SignalingOptions) {
 if (import.meta.main) {
     const rawPort = process.env.PORT ?? '3000';
     if (!/^\d+$/.test(rawPort) || Number(rawPort) < 1 || Number(rawPort) > 65535) throw new Error('PORT must be 1–65535');
-    const app = startSignaling({ adminToken: process.env.ADMIN_TOKEN ?? '', origin: process.env.PUBLIC_ORIGIN ?? 'http://localhost:3000', hostname: process.env.HOST ?? '127.0.0.1', port: Number(rawPort), turnSecret: process.env.TURN_SECRET, turnUrls: process.env.TURN_URLS?.split(',').map(value => value.trim()).filter(Boolean), relayOnly: process.env.RELAY_ONLY === 'true', trustProxy: process.env.TRUST_PROXY === 'true', emojiImportHosts: process.env.EMOJI_IMPORT_HOSTS?.split(',').map(value => value.trim()).filter(Boolean), dataDir: process.env.ACCOUNTS === 'off' ? undefined : process.env.DATA_DIR || 'data', apps: nativeApps(), nativePush: nativeSenderFromEnv() });
+    const app = startSignaling({ adminToken: process.env.ADMIN_TOKEN ?? '', origin: process.env.PUBLIC_ORIGIN ?? 'http://localhost:3000', hostname: process.env.HOST ?? '127.0.0.1', port: Number(rawPort), turnSecret: process.env.TURN_SECRET, turnUrls: process.env.TURN_URLS?.split(',').map(value => value.trim()).filter(Boolean), relayOnly: process.env.RELAY_ONLY === 'true', trustProxy: process.env.TRUST_PROXY === 'true', allowTestFlags: process.env.ALLOW_TEST_FLAGS === '1', emojiImportHosts: process.env.EMOJI_IMPORT_HOSTS?.split(',').map(value => value.trim()).filter(Boolean), dataDir: process.env.ACCOUNTS === 'off' ? undefined : process.env.DATA_DIR || 'data', apps: nativeApps(), nativePush: nativeSenderFromEnv() });
     console.log(`Signaling listening on ${app.server.url}`);
     for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, async () => { await app.stop(); process.exit(0); });
 }
