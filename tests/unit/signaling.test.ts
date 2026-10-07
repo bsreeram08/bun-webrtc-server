@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { startSignaling } from '../../packages/signaling/server';
 
 const adminToken = 'test-admin-secret-with-at-least-32-characters';
@@ -185,13 +185,19 @@ describe('self-hosted signaling over real HTTP and WebSocket sockets', () => {
         const manifestResponse = await instance.request('/core/manifest.json');
         expect(manifestResponse.status).toBe(200);
         expect(manifestResponse.headers.get('cache-control')).toBe('no-cache');
-        const manifest = await manifestResponse.json() as { js: string; wasm: string };
+        const manifest = await manifestResponse.json() as { js: string; wasm: string; sha256: Record<string, string> };
         const wasm = await instance.request(`/core/${manifest.wasm}`);
         expect(wasm.headers.get('content-type')).toBe('application/wasm');
         expect(wasm.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
         expect(wasm.headers.get('x-content-type-options')).toBe('nosniff');
-        expect(new Uint8Array(await wasm.arrayBuffer()).slice(0, 4)).toEqual(new Uint8Array([0, 97, 115, 109]));
-        expect((await instance.request(`/core/${manifest.js}`)).headers.get('content-type')).toContain('text/javascript');
+        const wasmBytes = new Uint8Array(await wasm.arrayBuffer());
+        expect(wasmBytes.slice(0, 4)).toEqual(new Uint8Array([0, 97, 115, 109]));
+        const js = await instance.request(`/core/${manifest.js}`);
+        expect(js.headers.get('content-type')).toContain('text/javascript');
+        // What the server actually serves is exactly what the manifest (and the provenance check) describes.
+        const digest = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
+        expect(digest(wasmBytes)).toBe(manifest.sha256[manifest.wasm]!);
+        expect(digest(new Uint8Array(await js.arrayBuffer()))).toBe(manifest.sha256[manifest.js]!);
         for (const path of ['/core/chatcore_bg.0000000000000000.wasm', '/core/../server.ts', '/core/%2e%2e/server.ts', '/core/chatcore.js', '/core/']) expect((await instance.request(path)).status).toBe(404);
     });
     test('forwards offers, answers and ICE only to the paired peer and strips spoofed fields', async () => {

@@ -1,14 +1,13 @@
 // Interop matrix: packages/signaling/public/signal.js and verify.js (run in a vm, as the browser
 // does) against crates/chatcore, both natively (the interop CLI over real sealed SQLite) and as WebAssembly
-// (crates/chatcore-wasm in this process, persisting only through its journal). Every scenario runs in every
-// direction between the three. Usage: node tests/interop/run.mjs   (builds the CLI and the wasm first)
+// (the committed crates/chatcore-wasm build in this process, persisting only through its journal). Every scenario
+// runs in every direction between the three. Usage: node tests/interop/run.mjs   (builds the CLI first)
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { createRequire } from 'node:module';
 import { createInterface } from 'node:readline';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runInNewContext } from 'node:vm';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -16,12 +15,13 @@ const crate = join(root, 'crates/chatcore');
 const build = spawnSync('cargo', ['build', '--quiet', '--bin', 'interop', '--manifest-path', join(crate, 'Cargo.toml')], { stdio: 'inherit' });
 if (build.status !== 0) process.exit(build.status ?? 1);
 const binary = join(crate, 'target/debug/interop');
-// The WebAssembly build (crates/chatcore-wasm, nodejs target) runs in this process, as the browser worker runs it.
-const wasmDir = mkdtempSync(join(tmpdir(), 'chatcore-wasm-node-'));
-const wasmBuild = spawnSync('bun', [join(root, 'scripts/build-wasm.ts'), '--node', wasmDir, '--node-only'], { stdio: 'inherit' });
-if (wasmBuild.status !== 0) process.exit(wasmBuild.status ?? 1);
-const { ChatCore } = createRequire(import.meta.url)(join(wasmDir, 'chatcore.js'));
-process.on('exit', () => rmSync(wasmDir, { recursive: true, force: true }));
+// The WebAssembly party loads the *committed* browser build (packages/signaling/public/core), the exact bytes
+// the server ships; `bun run build:wasm --check` separately proves they were built from this source.
+const coreDir = join(root, 'packages/signaling/public/core');
+const coreManifest = JSON.parse(readFileSync(join(coreDir, 'manifest.json'), 'utf8'));
+const coreModule = await import(pathToFileURL(join(coreDir, coreManifest.js)).href);
+coreModule.initSync({ module: readFileSync(join(coreDir, coreManifest.wasm)) });
+const { ChatCore } = coreModule;
 // Rust parties use real SQLite stores, one file each.
 const dataDir = mkdtempSync(join(tmpdir(), 'chatcore-interop-'));
 let databases = 0;

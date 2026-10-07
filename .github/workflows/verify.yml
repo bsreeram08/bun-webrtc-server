@@ -35,8 +35,13 @@ jobs:
         with:
           node-version: '22'
       - run: bun install --frozen-lockfile
-      - run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      - run: cargo install wasm-bindgen-cli --version =0.2.129 --locked
       - run: bun run build:wasm --check
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-rebuilt
+          path: wasm-rebuilt/
       - run: bun run test:interop
   calling:
     runs-on: ubuntu-latest
