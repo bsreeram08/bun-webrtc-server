@@ -91,8 +91,17 @@
     // Ask the browser not to evict the keys; and remember that this browser held them, so a browser that
     // silently drops site data (private tabs, in-app browsers) is named instead of looping on new keys.
     try { await navigator.storage?.persist?.(); } catch {}
-    try { keysLost = !await store.get('identity') && localStorage.getItem(`keys-held-v1:${user.id}`) === '1'; } catch { keysLost = false; }
-    box = window.Signal.box(store, { identityChanged: contactId => identityChanged(contactId) });
+    const hooks = { identityChanged: contactId => identityChanged(contactId) };
+    // Opt-in WebAssembly core (core.js): the same protocol from crates/chatcore, with its own sealed key store.
+    // Its keys are separate from signal.js's, so turning it on for an existing account is a new device here:
+    // the active-device banner offers "Use this device instead". (Migration of existing keys comes later.)
+    if (window.Core?.enabled() && window.Core.supported()) {
+      keysLost = false;
+      box = window.Core.box(user.id, hooks);
+    } else {
+      try { keysLost = !await store.get('identity') && localStorage.getItem(`keys-held-v1:${user.id}`) === '1'; } catch { keysLost = false; }
+      box = window.Signal.box(store, hooks);
+    }
     flagged = new Set(await store.get('flagged') || []);
     flagged.store = store;
     try { await publishKeys(); } catch (error) { say('chats-status', `Could not publish encryption keys: ${error.message}`); }
