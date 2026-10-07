@@ -1,6 +1,8 @@
 'use strict';
-const CACHE = 'private-conversations-shell-v8';
-const ASSETS = ['/', '/app.js', '/account.js', '/alerts.js', '/theme.js', '/commands.js', '/emoji.js', '/emoji-data.json', '/wallpaper-circuit.svg', '/vendor/simplewebauthn-browser.js', '/chat-store.js', '/signal.js', '/verify.js', '/style.css', '/install.js', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'];
+const CACHE = 'private-conversations-shell-v9';
+const ASSETS = ['/', '/app.js', '/account.js', '/alerts.js', '/theme.js', '/commands.js', '/emoji.js', '/emoji-data.json', '/wallpaper-circuit.svg', '/vendor/simplewebauthn-browser.js', '/chat-store.js', '/signal.js', '/core.js', '/core-worker.js', '/verify.js', '/style.css', '/install.js', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'];
+// The WebAssembly core's files are content-hashed: cached as they are fetched (network first), not precached.
+const CORE = /^\/core\/(manifest\.json|chatcore(?:_bg)?\.[0-9a-f]{16}\.(?:js|wasm))$/;
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS)));
   // Do not take over an active call. New code activates after old tabs close.
@@ -10,7 +12,7 @@ self.addEventListener('activate', event => {
 });
 self.addEventListener('fetch', event => {
   const request = event.request, url = new URL(request.url);
-  if (request.method !== 'GET' || url.origin !== self.location.origin || url.search || request.headers.has('authorization') || !ASSETS.includes(url.pathname)) return;
+  if (request.method !== 'GET' || url.origin !== self.location.origin || url.search || request.headers.has('authorization') || !(ASSETS.includes(url.pathname) || CORE.test(url.pathname))) return;
   event.respondWith((async () => {
     const cache = await caches.open(CACHE);
     try {

@@ -178,3 +178,6 @@ build/
 
 # Account database (passkeys, contacts, sessions)
 data/
+
+# Rebuilt WebAssembly kept by `bun run build:wasm --check` on a mismatch
+wasm-rebuilt/

@@ -17,6 +17,34 @@ jobs:
       - run: bun run typecheck
       - run: bun run test
       - run: docker build -t webrtc-bun:test .
+  # The messaging core: the committed WebAssembly must be exactly what this source builds (the server has no
+  # Rust and serves the committed files), and signal.js, the native core and the WebAssembly core must agree.
+  core:
+    # The committed core is built on darwin-arm64; --check compares bytes, so it runs on the same kind of host.
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.93.1
+          targets: wasm32-unknown-unknown
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: bun install --frozen-lockfile
+      - run: cargo install wasm-bindgen-cli --version =0.2.129 --locked
+      - run: bun run build:wasm --check
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-rebuilt
+          path: wasm-rebuilt/
+      - run: bun tests/interop/core-tamper.mjs
+      - run: bun run test:interop
   calling:
     runs-on: ubuntu-latest
     timeout-minutes: 20

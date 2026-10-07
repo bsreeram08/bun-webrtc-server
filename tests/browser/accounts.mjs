@@ -15,13 +15,17 @@ const playwright = await import(process.env.PLAYWRIGHT_MODULE || 'playwright-cor
 const port = Number(process.env.TEST_PORT || 3127), origin = `http://localhost:${port}`;
 const dataDir = process.env.DATA_DIR || mkdtempSync(join(tmpdir(), 'accounts-e2e-'));
 const shots = process.env.SCREENSHOT_DIR;
-const env = { ...process.env, PORT: String(port), ADMIN_TOKEN: randomBytes(32).toString('hex'), PUBLIC_ORIGIN: origin, DATA_DIR: dataDir };
+// ALLOW_TEST_FLAGS lets CORE=wasm pick the WebAssembly core without the Settings switch (loopback origins only).
+const env = { ...process.env, PORT: String(port), ADMIN_TOKEN: randomBytes(32).toString('hex'), PUBLIC_ORIGIN: origin, DATA_DIR: dataDir, ALLOW_TEST_FLAGS: '1' };
 const server = spawn('bun', ['--no-env-file', 'packages/signaling/server.ts'], { cwd: root, env, stdio: ['ignore', 'pipe', 'inherit'] });
 process.on('exit', () => server.kill());
 for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => process.exit(1));
 await new Promise((ok, fail) => { server.stdout.on('data', chunk => String(chunk).includes('listening') && ok()); server.on('exit', code => fail(new Error(`server exited ${code}`))); setTimeout(() => fail(new Error('server did not start')), 10000); });
 const browser = await playwright.chromium.launch({ executablePath: process.env.BROWSER_EXECUTABLE, args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'] });
 const step = name => console.log(`✓ ${name}`);
+// CORE=wasm runs every step with the WebAssembly messaging core (core.js) instead of signal.js.
+const wasm = process.env.CORE === 'wasm';
+const keyDb = wasm ? 'webrtc-bun-core-v1-' : 'webrtc-bun-signal-v1-';
 const pages = [];
 const diagnose = () => Promise.all(pages.map(page => page.evaluate(() => ({ auth: document.body.dataset.auth, screen: document.body.dataset.screen, state: document.body.dataset.state, status: document.getElementById('status').textContent, chat: document.getElementById('chat-status').textContent, verify: document.getElementById('verify-label').textContent, requests: Object.entries(performance.getEntriesByType('resource').reduce((all, entry) => { const key = new URL(entry.name).pathname.replace(/[A-Za-z0-9_-]{43}/, ':id'); all[key] = (all[key] || 0) + 1; return all; }, {})) })).catch(error => error.message)));
 const shot = async (page, name) => { if (shots) await page.screenshot({ path: join(shots, `${name.startsWith('e2e-') ? '' : 'acct-'}${name}.png`) }); };
@@ -32,6 +36,7 @@ const serverBytes = () => Buffer.concat(readdirSync(dataDir, { withFileTypes: tr
 async function person() {
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 });
   await context.grantPermissions(['camera', 'microphone'], { origin });
+  if (wasm) await context.addInitScript(() => localStorage.setItem('core-backend-test', 'wasm'));
   const page = await context.newPage(); pages.push(page);
   page.on('pageerror', error => { throw error; }); page.on('console', message => { if (message.text().includes('JOINDEBUG')) console.log(message.text()); });
   const cdp = await context.newCDPSession(page);
@@ -63,6 +68,16 @@ try {
   await visible(alice, '#invite-result');
   const link = await alice.inputValue('#invite-link');
   await register(bob, new URL(link).hash.slice('#invite='.length), 'bob'); step('bob registered with an invite alice created in the app');
+  if (wasm) {
+    // The keys must live in the WebAssembly core's sealed store, not signal.js's.
+    const where = await alice.evaluate(async () => {
+      const id = (await (await fetch('/api/me')).json()).user.id;
+      const rows = name => new Promise(resolve => { const request = indexedDB.open(name); request.onsuccess = () => { const db = request.result; if (!db.objectStoreNames.contains('kv')) { db.close(); return resolve([]); } const all = db.transaction('kv').objectStore('kv').getAllKeys(); all.onsuccess = () => { db.close(); resolve(all.result); }; }; request.onerror = () => resolve([]); });
+      return { core: await rows(`webrtc-bun-core-v1-${id}`), signal: await rows(`webrtc-bun-signal-v1-${id}`) };
+    });
+    if (!where.core.includes('identity') || where.signal.includes('identity')) throw new Error(`keys not in the WebAssembly core store: ${JSON.stringify(where)}`);
+    step('keys are held by the WebAssembly core (sealed IndexedDB), not signal.js');
+  }
 
   await alice.fill('#contact-input', 'bob'); await alice.click('#contact-add');
   await bob.getByRole('button', { name: 'Accept' }).click({ timeout: 15000 });
@@ -245,7 +260,8 @@ try {
   step('alice daily, bob weekly: both chats show the shorter interval, one day');
 
   // A session older than the interval rotates before the next message goes out.
-  await alice.evaluate(async () => {
+  if (wasm) await alice.evaluate(() => { const real = Date.now; window.__realNow = real; Date.now = () => real() + 2 * 86400000; });
+  else await alice.evaluate(async () => {
     const me = (await (await fetch('/api/me')).json()).user.id, peer = (await (await fetch('/api/contacts')).json()).contacts.find(contact => contact.username === 'bob').id;
     const db = await new Promise((ok, fail) => { const request = indexedDB.open(`webrtc-bun-signal-v1-${me}`, 1); request.onsuccess = () => ok(request.result); request.onerror = fail; });
     const run = (mode, work) => new Promise((ok, fail) => { const tx = db.transaction('kv', mode), request = work(tx.objectStore('kv')); tx.oncomplete = () => ok(request.result); tx.onerror = fail; });
@@ -257,10 +273,11 @@ try {
   await alice.fill('#chat-input', 'sent after a scheduled rotation'); await alice.click('#chat-send');
   await alice.waitForFunction(() => document.getElementById('chat-log').textContent.includes('Keys rotated on schedule (every day)'), null, { timeout: 15000 });
   await bob.waitForFunction(() => { const text = document.getElementById('chat-log').textContent; return text.includes('Keys rotated on schedule by alice') && text.includes('sent after a scheduled rotation'); }, null, { timeout: 15000 });
+  if (wasm) await alice.evaluate(() => { Date.now = window.__realNow; });
   step('a session older than the shared interval rotated automatically before the next message');
 
   // Key change: bob's device loses its keys (a reinstall). Alice verified him, so sending pauses.
-  await bob.evaluate(async () => { const id = (await (await fetch('/api/me')).json()).user.id; await new Promise(done => { const request = indexedDB.deleteDatabase(`webrtc-bun-signal-v1-${id}`); request.onsuccess = request.onerror = request.onblocked = done; }); });
+  await bob.evaluate(async keyDb => { const id = (await (await fetch('/api/me')).json()).user.id; await new Promise(done => { const request = indexedDB.deleteDatabase(`${keyDb}${id}`); request.onsuccess = request.onerror = request.onblocked = done; }); }, keyDb);
   await bob.reload(); await visible(bob, '#chats');
   // A device with new keys never takes over silently: it stays inactive until bob chooses it.
   await bob.waitForFunction(() => !document.getElementById('device-banner').hidden, null, { timeout: 15000 });
@@ -337,6 +354,23 @@ try {
   await alice.click('#signin'); await visible(alice, '#chats');
   if ((await alice.textContent('#me-name')) !== '@alice') throw new Error('Passkey sign-in returned the wrong user');
   step('signed out, then back in with the passkey');
+
+  // Settings → Advanced: switching the encryption core on a device that has keys needs an explicit reset.
+  const from = wasm ? 'wasm' : 'signal', to = wasm ? 'signal' : 'wasm';
+  const keysIn = which => alice.evaluate(async which => window.Core.hasKeys((await (await fetch('/api/me')).json()).user.id, which), which);
+  if (!await keysIn(from)) throw new Error(`alice has no keys in the ${from} core before switching`);
+  await alice.click('#account-menu summary'); await alice.click('#account-settings');
+  await alice.locator('#core-backend-switch').scrollIntoViewIfNeeded();
+  await alice.click('#core-backend-switch'); await visible(alice, '#core-confirm');
+  await alice.click('#core-confirm-cancel');
+  if (!await alice.isHidden('#core-confirm') || !await keysIn(from)) throw new Error('Cancelling the switch changed something');
+  await alice.click('#core-backend-switch'); await visible(alice, '#core-confirm');
+  await Promise.all([alice.waitForEvent('load'), alice.click('#core-confirm-yes')]);
+  await visible(alice, '#chats');
+  await alice.waitForFunction(() => document.getElementById('device-banner').hidden, null, { timeout: 15000 });
+  await alice.waitForFunction(async which => window.Core.hasKeys((await (await fetch('/api/me')).json()).user.id, which), to, { timeout: 15000 });
+  if (await keysIn(from)) throw new Error(`the ${from} core still holds keys after the switch`);
+  step(`switching the encryption core (${from} → ${to}) needed a confirmed reset; the new core took over with fresh keys`);
   console.log('Accounts end-to-end check passed.');
 } catch (error) {
   console.error('Page state:', JSON.stringify(await diagnose(), null, 1));

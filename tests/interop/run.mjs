@@ -1,12 +1,13 @@
 // Interop matrix: packages/signaling/public/signal.js and verify.js (run in a vm, as the browser
-// does) against crates/chatcore through its interop CLI. Every scenario runs in both directions.
-// Usage: node tests/interop/run.mjs   (builds the CLI with cargo first)
+// does) against crates/chatcore, both natively (the interop CLI over real sealed SQLite) and as WebAssembly
+// (the committed crates/chatcore-wasm build in this process, persisting only through its journal). Every scenario
+// runs in every direction between the three. Usage: node tests/interop/run.mjs   (builds the CLI first)
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runInNewContext } from 'node:vm';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -14,6 +15,13 @@ const crate = join(root, 'crates/chatcore');
 const build = spawnSync('cargo', ['build', '--quiet', '--bin', 'interop', '--manifest-path', join(crate, 'Cargo.toml')], { stdio: 'inherit' });
 if (build.status !== 0) process.exit(build.status ?? 1);
 const binary = join(crate, 'target/debug/interop');
+// The WebAssembly party loads the *committed* browser build (packages/signaling/public/core), the exact bytes
+// the server ships; `bun run build:wasm --check` separately proves they were built from this source.
+const coreDir = join(root, 'packages/signaling/public/core');
+const coreManifest = JSON.parse(readFileSync(join(coreDir, 'manifest.json'), 'utf8'));
+const coreModule = await import(pathToFileURL(join(coreDir, coreManifest.js)).href);
+coreModule.initSync({ module: readFileSync(join(coreDir, coreManifest.wasm)) });
+const { ChatCore } = coreModule;
 // Rust parties use real SQLite stores, one file each.
 const dataDir = mkdtempSync(join(tmpdir(), 'chatcore-interop-'));
 let databases = 0;
@@ -79,9 +87,33 @@ function rustParty(name) {
     const waiting = [];
     lines.on('line', line => waiting.shift()?.(JSON.parse(line)));
     const call = command => new Promise(resolve => { waiting.push(resolve); child.stdin.write(JSON.stringify(command) + '\n'); });
+    return commandParty('rust', name, call, () => { child.stdin.end(); child.kill(); });
+}
+/**
+ * The WebAssembly core as the browser worker runs it: its key database exists only as the journaled writes
+ * each call returns (here a Map standing in for IndexedDB), and the core is rebuilt from that Map after every
+ * call that leaves no decrypt pending — so every row must really have been persisted.
+ */
+function wasmParty(name) {
+    const disk = new Map();
+    let existed = false, pending = 0, core = new ChatCore('{}', false);
+    const call = async command => {
+        const result = JSON.parse(core.call(JSON.stringify(command)));
+        for (const write of result.writes) if ('put' in write) disk.set(write.put, write.value); else disk.delete(write.delete);
+        delete result.writes;
+        existed ||= disk.size > 0;
+        if (command.cmd === 'decrypt' && command.commit === false && 'ok' in result) pending++;
+        if (command.cmd === 'commit' || command.cmd === 'abort') pending = Math.max(0, pending - 1);
+        if (!pending) { core.free(); core = new ChatCore(JSON.stringify(Object.fromEntries(disk)), existed); }
+        return result;
+    };
+    return commandParty('wasm', name, call, () => core.free());
+}
+/** A party driven through chatcore's JSON command protocol (the native CLI or the WebAssembly build). */
+function commandParty(kind, name, call, close) {
     const unwrap = async command => { const result = await call(command); if ('error' in result) throw Object.assign(new Error(result.error), { code: result.code }); return result.ok; };
     return {
-        kind: 'rust', name,
+        kind, name,
         async bundle(withOpk = true) {
             const keys = await unwrap({ cmd: 'prekeys', now: NOW });
             const opk = withOpk ? (await unwrap({ cmd: 'opks', count: 1 }))[0] : null;
@@ -111,7 +143,7 @@ function rustParty(name) {
         setVerified: async (contact, verified) => unwrap({ cmd: 'setVerified', contact, verified }),
         forget: async contact => unwrap({ cmd: 'forget', contact }),
         call: unwrap,
-        close() { child.stdin.end(); child.kill(); },
+        close,
     };
 }
 
@@ -130,7 +162,9 @@ async function setup(makeA, makeB, withOpk) {
     return { a, b, toB, toA, fetches: () => bundleFetches };
 }
 
-const directions = [['js', jsParty, 'rust', rustParty], ['rust', rustParty, 'js', jsParty]];
+// Every ordered pair of signal.js, the native core and the WebAssembly core.
+const implementations = [['js', jsParty], ['rust', rustParty], ['wasm', wasmParty]];
+const directions = implementations.flatMap(([nameA, makeA]) => implementations.filter(([nameB]) => nameB !== nameA).map(([nameB, makeB]) => [nameA, makeA, nameB, makeB]));
 
 async function scenario(title, body) {
     for (const [nameA, makeA, nameB, makeB] of directions) {
@@ -332,9 +366,9 @@ await scenario('rotation: a reset arriving on an old session is ignored', async 
 });
 
 // ---------- Call verification code ----------
-{
-    const rust = rustParty('sas');
-    const label = 'call verification code (verify.js ↔ chatcore)';
+for (const [kind, make] of [['rust', rustParty], ['wasm', wasmParty]]) {
+    const rust = make('sas');
+    const label = `call verification code (verify.js ↔ chatcore ${kind})`;
     const before = failures;
     try {
         const print = byte => `sha-256 ${Array(32).fill(byte).join(':')}`;

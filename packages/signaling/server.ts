@@ -1,4 +1,6 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import { verifyCore } from './core-manifest';
 import type { ServerWebSocket } from 'bun';
 import { packetBudget } from '../stun-server/native/server';
 import { requestLimiter, requestSource } from './rate-limit';
@@ -13,6 +15,8 @@ type Room = { id: string; expiresAt: number; participants: Participant[]; sessio
 type Connection = { kind?: undefined; room: Room; participant: Participant; credential: string; allow: () => boolean };
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 const token = () => randomBytes(32).toString('base64url');
+// 'wasm-unsafe-eval' lets the worker instantiate the messaging core's WebAssembly; it does not allow eval().
+const PAGE_CSP = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self'; media-src 'self' blob:; img-src 'self' blob:; manifest-src 'self'; worker-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
 const json = (value: unknown, status = 200) => Response.json(value, {
     status, headers: { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' },
 });
@@ -43,6 +47,11 @@ export type SignalingOptions = {
     emojiImportHosts?: string[];
     emojiFetcher?: Fetcher;
     emojiResolver?: Resolver;
+    /** Test-only switches for the browser suites (e.g. choosing the encryption core). Honoured only on a
+     *  loopback origin, so a production server can never expose them even if misconfigured. */
+    allowTestFlags?: boolean;
+    /** Directory of the WebAssembly core (tests point this at tampered copies); verified like the default. */
+    coreDir?: string;
 };
 export type NativeApps = { appleAppIds?: string[]; androidPackage?: string; androidCertSha256?: string[]; androidApkKeyHashes?: string[] };
 
@@ -80,6 +89,9 @@ export function wellKnown(apps: NativeApps = {}) {
 export function startSignaling(options: SignalingOptions) {
     if (options.adminToken.length < 32) throw new Error('ADMIN_TOKEN must contain at least 32 characters');
     const origin = new URL(options.origin);
+    // The WebAssembly core is verified once, before serving anything: a missing, extra or altered file stops startup.
+    const coreFiles = verifyCore(options.coreDir ?? fileURLToPath(new URL('./public/core', import.meta.url)));
+    const testFlags = Boolean(options.allowTestFlags) && ['localhost', '127.0.0.1', '[::1]'].includes(origin.hostname);
     if (origin.origin !== options.origin || !['http:', 'https:'].includes(origin.protocol)) throw new Error('PUBLIC_ORIGIN must be an exact HTTP(S) origin');
     if (origin.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(origin.hostname)) throw new Error('Public deployments require HTTPS');
     const rooms = new Map<string, Room>();
@@ -164,6 +176,7 @@ export function startSignaling(options: SignalingOptions) {
                 if (Number(declared) > cap) return json({ error: 'Request too large' }, 413);
             }
             if (request.method === 'GET' && url.pathname === '/health') return json({ status: 'ok' });
+            if (request.method === 'GET' && url.pathname === '/test-flags.json') return testFlags ? json({ testFlags: true }) : json({ error: 'Not found' }, 404);
             // Fetched by Apple's CDN and Google's verifier: exact JSON, no redirect, 404 until configured.
             if (request.method === 'GET' && (url.pathname === '/.well-known/apple-app-site-association' || url.pathname === '/.well-known/assetlinks.json')) {
                 const file = url.pathname.endsWith('.json') ? associations.android : associations.apple;
@@ -172,12 +185,22 @@ export function startSignaling(options: SignalingOptions) {
             const source = requestSource(server.requestIP(request)?.address, request.headers, options.trustProxy);
             const requestOrigin = request.headers.get('origin');
             if (requestOrigin && requestOrigin !== options.origin) return json({ error: 'Origin denied' }, 403);
-            if (request.method === 'GET' && ['/', '/app.js', '/account.js', '/alerts.js', '/theme.js', '/commands.js', '/emoji.js', '/emoji-data.json', '/wallpaper-circuit.svg', '/chat-store.js', '/signal.js', '/verify.js', '/vendor/simplewebauthn-browser.js', '/style.css', '/install.js', '/sw.js', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'].includes(url.pathname)) {
+            if (request.method === 'GET' && ['/', '/app.js', '/account.js', '/alerts.js', '/theme.js', '/commands.js', '/emoji.js', '/emoji-data.json', '/wallpaper-circuit.svg', '/chat-store.js', '/signal.js', '/verify.js', '/core.js', '/core-worker.js', '/vendor/simplewebauthn-browser.js', '/style.css', '/install.js', '/sw.js', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'].includes(url.pathname)) {
                 const path = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
                 return new Response(Bun.file(new URL(`./public/${path}`, import.meta.url)), { headers: {
-                    'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; media-src 'self' blob:; img-src 'self' blob:; manifest-src 'self'; worker-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+                    'Content-Security-Policy': PAGE_CSP,
                     'Permissions-Policy': 'camera=(self), microphone=(self), display-capture=()',
                     'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store',
+                } });
+            }
+            // The WebAssembly messaging core (scripts/build-wasm.ts): content-hashed, so cached immutably; only the
+            // manifest that names the current files is revalidated.
+            // Only the files the verified manifest names, from the bytes verified at startup.
+            const core = request.method === 'GET' && url.pathname.startsWith('/core/') ? coreFiles.get(url.pathname.slice('/core/'.length)) : undefined;
+            if (core) {
+                return new Response(core.bytes, { headers: {
+                    'Content-Type': core.type, 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': PAGE_CSP,
+                    'Cache-Control': core.name === 'manifest.json' ? 'no-cache' : 'public, max-age=31536000, immutable',
                 } });
             }
             // Custom emoji images are public, content-addressed and immutable: served like the fixed files.
@@ -297,7 +320,7 @@ export function startSignaling(options: SignalingOptions) {
 if (import.meta.main) {
     const rawPort = process.env.PORT ?? '3000';
     if (!/^\d+$/.test(rawPort) || Number(rawPort) < 1 || Number(rawPort) > 65535) throw new Error('PORT must be 1–65535');
-    const app = startSignaling({ adminToken: process.env.ADMIN_TOKEN ?? '', origin: process.env.PUBLIC_ORIGIN ?? 'http://localhost:3000', hostname: process.env.HOST ?? '127.0.0.1', port: Number(rawPort), turnSecret: process.env.TURN_SECRET, turnUrls: process.env.TURN_URLS?.split(',').map(value => value.trim()).filter(Boolean), relayOnly: process.env.RELAY_ONLY === 'true', trustProxy: process.env.TRUST_PROXY === 'true', emojiImportHosts: process.env.EMOJI_IMPORT_HOSTS?.split(',').map(value => value.trim()).filter(Boolean), dataDir: process.env.ACCOUNTS === 'off' ? undefined : process.env.DATA_DIR || 'data', apps: nativeApps(), nativePush: nativeSenderFromEnv() });
+    const app = startSignaling({ adminToken: process.env.ADMIN_TOKEN ?? '', origin: process.env.PUBLIC_ORIGIN ?? 'http://localhost:3000', hostname: process.env.HOST ?? '127.0.0.1', port: Number(rawPort), turnSecret: process.env.TURN_SECRET, turnUrls: process.env.TURN_URLS?.split(',').map(value => value.trim()).filter(Boolean), relayOnly: process.env.RELAY_ONLY === 'true', trustProxy: process.env.TRUST_PROXY === 'true', allowTestFlags: process.env.ALLOW_TEST_FLAGS === '1', emojiImportHosts: process.env.EMOJI_IMPORT_HOSTS?.split(',').map(value => value.trim()).filter(Boolean), dataDir: process.env.ACCOUNTS === 'off' ? undefined : process.env.DATA_DIR || 'data', apps: nativeApps(), nativePush: nativeSenderFromEnv() });
     console.log(`Signaling listening on ${app.server.url}`);
     for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, async () => { await app.stop(); process.exit(0); });
 }
