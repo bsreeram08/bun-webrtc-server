@@ -1,0 +1,38 @@
+[package]
+name = "mls-spike"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+openmls = "=0.9.0"
+openmls_rust_crypto = "=0.6.0"
+openmls_traits = "=0.6.0"
+openmls_basic_credential = "=0.6.0"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.8"
+thiserror = "2"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+# RustCrypto 0.11-era crates (hpke-rs-rust-crypto via crypto-common) pull getrandom 0.4, which needs its own wasm backend.
+getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+openmls = { version = "=0.9.0", features = ["js"] }
+wasm-bindgen = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
