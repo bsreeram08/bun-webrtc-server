@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { startSignaling } from '../../packages/signaling/server';
 
 const adminToken = 'test-admin-secret-with-at-least-32-characters';
@@ -168,16 +168,37 @@ describe('self-hosted signaling over real HTTP and WebSocket sockets', () => {
             expect(response.status).toBe(200);
             const csp = response.headers.get('content-security-policy')!;
             expect(csp).toContain("default-src 'none'");
-            expect(csp).toContain("script-src 'self'");
+            // 'wasm-unsafe-eval' allows instantiating the messaging core's WebAssembly, and nothing else: no eval().
+            expect(csp).toContain("script-src 'self' 'wasm-unsafe-eval';");
             expect(csp).toContain("frame-ancestors 'none'");
             expect(csp).not.toContain('unsafe-inline');
-            expect(csp).not.toContain('unsafe-eval');
+            expect(csp.replaceAll("'wasm-unsafe-eval'", '')).not.toContain('unsafe-eval');
             expect(response.headers.get('referrer-policy')).toBe('no-referrer');
             expect(response.headers.get('x-content-type-options')).toBe('nosniff');
             expect(response.headers.get('permissions-policy')).toContain('camera=(self), microphone=(self)');
             expect(await response.text()).not.toBe('');
         }
         for (const path of ['/server.ts', '/.env', '/%2e%2e/server.ts']) expect((await instance.request(path)).status).toBe(404);
+    });
+    test('the WebAssembly core is served by content hash, immutably, and only the manifest revalidates', async () => {
+        const instance = app();
+        const manifestResponse = await instance.request('/core/manifest.json');
+        expect(manifestResponse.status).toBe(200);
+        expect(manifestResponse.headers.get('cache-control')).toBe('no-cache');
+        const manifest = await manifestResponse.json() as { js: string; wasm: string; sha256: Record<string, string> };
+        const wasm = await instance.request(`/core/${manifest.wasm}`);
+        expect(wasm.headers.get('content-type')).toBe('application/wasm');
+        expect(wasm.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
+        expect(wasm.headers.get('x-content-type-options')).toBe('nosniff');
+        const wasmBytes = new Uint8Array(await wasm.arrayBuffer());
+        expect(wasmBytes.slice(0, 4)).toEqual(new Uint8Array([0, 97, 115, 109]));
+        const js = await instance.request(`/core/${manifest.js}`);
+        expect(js.headers.get('content-type')).toContain('text/javascript');
+        // What the server actually serves is exactly what the manifest (and the provenance check) describes.
+        const digest = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
+        expect(digest(wasmBytes)).toBe(manifest.sha256[manifest.wasm]!);
+        expect(digest(new Uint8Array(await js.arrayBuffer()))).toBe(manifest.sha256[manifest.js]!);
+        for (const path of ['/core/chatcore_bg.0000000000000000.wasm', '/core/../server.ts', '/core/%2e%2e/server.ts', '/core/chatcore.js', '/core/']) expect((await instance.request(path)).status).toBe(404);
     });
     test('forwards offers, answers and ICE only to the paired peer and strips spoofed fields', async () => {
         const instance = app();
