@@ -54,11 +54,13 @@
     if (value && WALLPAPERS[value.wallpaper]) out.wallpaper = value.wallpaper;
     return out;
   }
+  function chatKey(id) { return typeof id === 'string' && /^[A-Za-z0-9_:-]{1,80}$/.test(id) && !['__proto__', 'constructor', 'prototype'].includes(id); }
   function load() {
     let raw = {};
     try { raw = JSON.parse(localStorage.getItem(`theme-v1:${account}`) || '{}') || {}; } catch {}
-    const chats = {};
-    for (const [id, value] of Object.entries(raw.chats && typeof raw.chats === 'object' ? raw.chats : {}).slice(-MAX_CHATS)) if (/^[A-Za-z0-9_:-]{1,80}$/.test(id)) chats[id] = clean(value);
+    // A prototype-less map: no conversation id (stored or live) can ever reach Object.prototype.
+    const chats = Object.create(null);
+    for (const [id, value] of Object.entries(raw.chats && typeof raw.chats === 'object' ? raw.chats : {}).slice(-MAX_CHATS)) if (chatKey(id)) chats[id] = clean(value);
     return { app: clean(raw.app), chats };
   }
   function save() {
@@ -106,7 +108,7 @@
     button.onclick = () => choose({ wallpaper: name });
     return button;
   }
-  function target() { return scope === 'chat' && currentChat ? (prefs.chats[currentChat] ||= {}) : prefs.app; }
+  function target() { return scope === 'chat' && chatKey(currentChat) ? (prefs.chats[currentChat] ||= {}) : prefs.app; }
   function choose(change) {
     const entry = target();
     for (const [key, value] of Object.entries(change)) { if (value === undefined) delete entry[key]; else entry[key] = value; }
@@ -167,7 +169,7 @@
     setChatPreset(name) {
       const wanted = String(name || '').toLowerCase();
       const key = wanted === 'default' ? 'default' : Object.keys(PRESETS).find(id => id === wanted || PRESETS[id].name.toLowerCase() === wanted);
-      if (!key || !currentChat) return false;
+      if (!key || !chatKey(currentChat)) return false;
       const entry = prefs.chats[currentChat] ||= {};
       if (key === 'default') { delete entry.preset; delete entry.accent; } else { entry.preset = key; delete entry.accent; }
       save(); apply(); return true;

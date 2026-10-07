@@ -21,6 +21,15 @@ function load(stored: Record<string, string> = {}) {
 }
 
 describe('themes', () => {
+    test('stored or live conversation ids named __proto__/constructor never touch Object.prototype', () => {
+        const stored = { 'theme-v1:guest': JSON.stringify({ app: {}, chats: { __proto__: { preset: 'dusk', polluted: true }, constructor: { preset: 'dusk' } } }) };
+        const { Theme } = load(stored);
+        Theme.setAccount('guest');
+        Theme.use('__proto__');
+        expect(Theme.setChatPreset('dusk')).toBe(false);
+        expect(({} as any).polluted).toBeUndefined();
+        expect(({} as any).preset).toBeUndefined();
+    });
     test('every preset with any accent keeps bubble text and button text readable (WCAG AA)', () => {
         const { Theme } = load();
         for (const preset of Object.keys(Theme.PRESETS)) for (const accent of [null, '#ff8a3d', '#ffe600', '#2040ff', '#ffffff', '#000000', '#7f7f7f']) {
