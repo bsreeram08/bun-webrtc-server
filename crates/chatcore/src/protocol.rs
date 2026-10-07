@@ -207,7 +207,11 @@ pub struct State {
 
 /// Unix time in milliseconds.
 pub fn now_ms() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_millis() as u64)
+    // wasm32-unknown-unknown has no system clock (SystemTime::now panics there): use the JS clock.
+    #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+    { js_sys::Date::now() as u64 }
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+    { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_millis() as u64) }
 }
 
 fn ratchet_step(state: &mut State, remote: &str) -> Result<()> {
