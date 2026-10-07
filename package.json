@@ -19,7 +19,8 @@
         "manager:w": "bun --watch ./packages/manager/main.ts",
         "stun-server:s": "bun ./packages/stun-server/main.ts",
         "stun-server:w": "bun --watch ./packages/stun-server/main.ts",
-        "stun-server:build-node": "sh ./scripts/build.stun-server-node.sh"
+        "stun-server:build-node": "sh ./scripts/build.stun-server-node.sh",
+        "build:wasm": "bun scripts/build-wasm.ts"
     },
     "devDependencies": {
         "@simplewebauthn/browser": "14.0.0",

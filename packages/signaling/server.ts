@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import type { ServerWebSocket } from 'bun';
 import { packetBudget } from '../stun-server/native/server';
 import { requestLimiter, requestSource } from './rate-limit';
@@ -13,6 +14,9 @@ type Room = { id: string; expiresAt: number; participants: Participant[]; sessio
 type Connection = { kind?: undefined; room: Room; participant: Participant; credential: string; allow: () => boolean };
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 const token = () => randomBytes(32).toString('base64url');
+// 'wasm-unsafe-eval' lets the worker instantiate the messaging core's WebAssembly; it does not allow eval().
+const PAGE_CSP = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self'; media-src 'self' blob:; img-src 'self' blob:; manifest-src 'self'; worker-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
+const CORE_FILE = /^\/core\/(manifest\.json|chatcore(?:_bg)?\.[0-9a-f]{16}\.(?:js|wasm))$/;
 const json = (value: unknown, status = 200) => Response.json(value, {
     status, headers: { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' },
 });
@@ -172,12 +176,25 @@ export function startSignaling(options: SignalingOptions) {
             const source = requestSource(server.requestIP(request)?.address, request.headers, options.trustProxy);
             const requestOrigin = request.headers.get('origin');
             if (requestOrigin && requestOrigin !== options.origin) return json({ error: 'Origin denied' }, 403);
-            if (request.method === 'GET' && ['/', '/app.js', '/account.js', '/alerts.js', '/theme.js', '/commands.js', '/emoji.js', '/emoji-data.json', '/wallpaper-circuit.svg', '/chat-store.js', '/signal.js', '/verify.js', '/vendor/simplewebauthn-browser.js', '/style.css', '/install.js', '/sw.js', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'].includes(url.pathname)) {
+            if (request.method === 'GET' && ['/', '/app.js', '/account.js', '/alerts.js', '/theme.js', '/commands.js', '/emoji.js', '/emoji-data.json', '/wallpaper-circuit.svg', '/chat-store.js', '/signal.js', '/verify.js', '/core.js', '/core-worker.js', '/vendor/simplewebauthn-browser.js', '/style.css', '/install.js', '/sw.js', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'].includes(url.pathname)) {
                 const path = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
                 return new Response(Bun.file(new URL(`./public/${path}`, import.meta.url)), { headers: {
-                    'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; media-src 'self' blob:; img-src 'self' blob:; manifest-src 'self'; worker-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+                    'Content-Security-Policy': PAGE_CSP,
                     'Permissions-Policy': 'camera=(self), microphone=(self), display-capture=()',
                     'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store',
+                } });
+            }
+            // The WebAssembly messaging core (scripts/build-wasm.ts): content-hashed, so cached immutably; only the
+            // manifest that names the current files is revalidated.
+            const core = request.method === 'GET' && CORE_FILE.exec(url.pathname);
+            if (core) {
+                const location = new URL(`./public/core/${core[1]}`, import.meta.url);
+                if (!existsSync(location)) return json({ error: 'Not found' }, 404);
+                const file = Bun.file(location);
+                const type = core[1].endsWith('.wasm') ? 'application/wasm' : core[1].endsWith('.js') ? 'text/javascript; charset=utf-8' : 'application/json';
+                return new Response(file, { headers: {
+                    'Content-Type': type, 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': PAGE_CSP,
+                    'Cache-Control': core[1] === 'manifest.json' ? 'no-cache' : 'public, max-age=31536000, immutable',
                 } });
             }
             // Custom emoji images are public, content-addressed and immutable: served like the fixed files.

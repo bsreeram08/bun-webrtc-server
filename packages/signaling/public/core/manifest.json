@@ -1,0 +1,15 @@
+{
+  "js": "chatcore.98e35a3f0ad57bd9.js",
+  "wasm": "chatcore_bg.c1800817b74c00fb.wasm",
+  "sha256": {
+    "chatcore.98e35a3f0ad57bd9.js": "98e35a3f0ad57bd97fdceccc2e3fb2d153aea4df5e017b2942fb768c49b7be40",
+    "chatcore_bg.c1800817b74c00fb.wasm": "c1800817b74c00fb2a11c617934a5c274e4124e1ad073751c3c7f1a0eb459468"
+  },
+  "bytes": {
+    "chatcore.98e35a3f0ad57bd9.js": 15690,
+    "chatcore_bg.c1800817b74c00fb.wasm": 363244
+  },
+  "protocol": "chatcore-commands-1",
+  "wasmBindgen": "0.2.129",
+  "rustc": "rustc 1.93.1 (01f6ddf75 2026-02-11)"
+}
