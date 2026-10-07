@@ -1,29 +1,34 @@
 // Builds crates/chatcore-wasm for the browser into packages/signaling/public/core/ (content-hashed files plus
 // manifest.json).
 //
-//   bun run build:wasm            rebuild the committed browser artifacts
-//   bun run build:wasm --check    fail unless the committed artifacts were built from exactly this source
+//   bun run build:wasm                          rebuild the committed browser artifacts
+//   bun run build:wasm --check [--core-dir d]   fail unless the committed core is exactly what this source builds
 //
 // The artifacts are committed because the server has no Rust toolchain: deploy.sh only pulls main.
 //
-// What --check guarantees (CI runs it, then runs the interop matrix against the *committed* bytes):
-// - Provenance: the manifest records a hash of every input (both crates' manifests, lockfiles and sources,
-//   rustc and wasm-bindgen versions); --check recomputes it, so stale artifacts can't be committed.
-// - Bytes: rebuilding on the same kind of host must reproduce the committed files exactly. A build on a
-//   different OS/architecture is not byte-identical — Cargo mixes the host triple into the metadata of crates
-//   that use proc-macros (serde, wasm-bindgen), which reorders the module — so across hosts --check reports
-//   the difference without failing, and the interop matrix proves the committed module's behaviour.
+// --check is fail-closed, has no bypass, and runs in CI on every push:
+// 1. verifyCore (the same check the server runs at startup): exactly manifest.json plus the two files it
+//    names, each with its recorded SHA-256 — no extra, missing or altered files.
+// 2. Provenance: the manifest's hash of every input (both crates' manifests, lockfiles and sources, rustc and
+//    wasm-bindgen versions) must equal this source's.
+// 3. Bytes: a rebuild must reproduce the committed files exactly. That catches a file swapped together with a
+//    rewritten manifest. Builds are byte-identical only on the same kind of host (Cargo mixes the host triple
+//    into the metadata of crates that use proc-macros, which reorders the module), so the committed core is
+//    built on CANONICAL_HOST and --check refuses to run anywhere else; CI's core job runs on that host.
 // No wasm-opt: it isn't on every machine, and an optional step would make the output machine-dependent.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants, copyFileSync, cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { arch, homedir, platform, tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
+import { verifyCore } from '../packages/signaling/core-manifest';
 
 const root = resolve(import.meta.dir, '..');
 const crates = ['chatcore', 'chatcore-wasm'];
 const out = join(root, 'packages/signaling/public/core');
 const check = process.argv.includes('--check');
+const coreDir = process.argv.includes('--core-dir') ? resolve(process.argv[process.argv.indexOf('--core-dir') + 1]) : out;
+const CANONICAL_HOST = 'darwin-arm64';
 
 function run(command: string, argv: string[], env: Record<string, string> = {}) {
     const result = spawnSync(command, argv, { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...env }, encoding: 'utf8' });
@@ -84,6 +89,14 @@ function copyRegular(from: string, to: string) {
 }
 
 function main() {
+    const host = `${platform()}-${arch()}`;
+    if (host !== CANONICAL_HOST) {
+        console.error(`The committed core is built and checked on ${CANONICAL_HOST}; this is ${host}. Byte-for-byte checks across hosts are impossible (see the header), so run this on ${CANONICAL_HOST} (CI: macos-14).`);
+        return 1;
+    }
+    if (check) {
+        try { verifyCore(coreDir); } catch (error: any) { console.error(error.message); return 1; }
+    }
     privateDirectory(BUILD);
     rmSync(join(BUILD, 'crates'), { recursive: true, force: true });
     for (const name of crates) cpSync(join(root, 'crates', name), join(BUILD, 'crates', name), { recursive: true, verbatimSymlinks: true, filter: source => !source.split('/').includes('target') && !lstatSync(source).isSymbolicLink() });
@@ -100,21 +113,17 @@ function main() {
         for (const file of [stagedWasm, stagedJs]) { const info = lstatSync(file); if (!info.isFile() || info.isSymbolicLink()) throw new Error(`unexpected ${file}`); }
         const wasm = readFileSync(stagedWasm), glue = readFileSync(stagedJs);
         const wasmName = `chatcore_bg.${sha(wasm).slice(0, 16)}.wasm`, jsName = `chatcore.${sha(glue).slice(0, 16)}.js`;
-        const source = sourceHash(), host = `${platform()}-${arch()}`;
+        const source = sourceHash();
 
         if (check) {
-            const committed = JSON.parse(readFileSync(join(out, 'manifest.json'), 'utf8'));
+            const committed = JSON.parse(readFileSync(join(coreDir, 'manifest.json'), 'utf8'));
             if (committed.source !== source) {
                 console.error('The committed WebAssembly core was not built from this source (its input hash differs).\nRun bun run build:wasm and commit packages/signaling/public/core/.');
                 return 1;
             }
-            const same = committed.js === jsName && committed.wasm === wasmName && readFileSync(join(out, jsName)).equals(glue) && readFileSync(join(out, wasmName)).equals(wasm);
+            const same = committed.js === jsName && committed.wasm === wasmName && readFileSync(join(coreDir, jsName)).equals(glue) && readFileSync(join(coreDir, wasmName)).equals(wasm);
             if (same) { console.log(`Committed core matches the source byte for byte: ${jsName}, ${wasmName}`); return 0; }
-            if (committed.host !== host) {
-                console.log(`Committed core was built from this source (input hash matches) on ${committed.host}; a ${host} rebuild differs in layout only, as expected across hosts.`);
-                return 0;
-            }
-            console.error(`Same host (${host}) but different bytes: the build is not reproducible.\n  committed: ${committed.js} ${committed.wasm}\n  rebuilt:   ${jsName} ${wasmName}`);
+            console.error(`The committed core is not what this source builds (different bytes).\n  committed: ${committed.js} ${committed.wasm}\n  rebuilt:   ${jsName} ${wasmName}`);
             const keep = join(root, 'wasm-rebuilt'); // CI uploads this so a mismatch can be inspected.
             mkdirSync(keep, { recursive: true });
             copyRegular(stagedWasm, join(keep, wasmName));
