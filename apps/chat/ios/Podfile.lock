@@ -1,0 +1,22 @@
+PODS:
+  - chatcore_bridge (0.0.1):
+    - Flutter
+  - Flutter (1.0.0)
+
+DEPENDENCIES:
+  - chatcore_bridge (from `.symlinks/plugins/chatcore_bridge/ios`)
+  - Flutter (from `Flutter`)
+
+EXTERNAL SOURCES:
+  chatcore_bridge:
+    :path: ".symlinks/plugins/chatcore_bridge/ios"
+  Flutter:
+    :path: Flutter
+
+SPEC CHECKSUMS:
+  chatcore_bridge: b4919deaff3ab6dab77e4257929ed313b5ecdd01
+  Flutter: 71a624a5bc0c04062bf19101d501e466baf2fb47
+
+PODFILE CHECKSUM: 3ba3a73b1b12adcf321a227a745625fe0888cc82
+
+COCOAPODS: 1.16.2

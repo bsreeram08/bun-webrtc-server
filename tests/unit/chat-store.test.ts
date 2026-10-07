@@ -1,0 +1,358 @@
+import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
+import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
+
+const source = readFileSync(new URL('../../packages/signaling/public/chat-store.js', import.meta.url), 'utf8');
+const PASSWORD = 'correct horse battery staple';
+const NOW = 1800000000000;
+const ROOM = 'r'.repeat(43);
+type Message = { id: string; conversationId: string; direction: 'incoming' | 'outgoing' | 'system'; text: string; createdAt: number; status: 'queued' | 'sent' | 'delivered' | 'uncertain'; expiresAt: number | null };
+type Store = { receive(conversationId: string, payload: unknown): Promise<string>; note(conversationId: string, id: string, text: string): Promise<boolean>; checkPayload(payload: unknown): string; inboundDisposition(error: any, attempts: number): { ack: boolean; notice: string | null }; put(message: unknown): Promise<Message>; list(): Promise<Message[]>; clear(): Promise<void>; removeConversation(conversationId: string): Promise<void>; setStatus(conversationId: string, id: string, status: string): Promise<boolean>; exportBackup(password: string): Promise<Blob>; importBackup(file: Blob, password: string): Promise<number> };
+function fixture() {
+  let now = NOW;
+  class Clock extends Date { static override now() { return now; } }
+  const indexedDB = new IDBFactory();
+  const context: Record<string, any> = { indexedDB, IDBKeyRange, crypto, Blob, TextEncoder, TextDecoder, Uint8Array, Date: Clock, atob, btoa };
+  context.window = context;
+  runInNewContext(source, context);
+  return { store: context.ChatStore as Store, indexedDB, advance(ms: number) { now += ms; } };
+}
+function message(values: Partial<Message> = {}): Message {
+  return { id: crypto.randomUUID(), conversationId: ROOM, direction: 'outgoing', text: 'Private hello 🌱', createdAt: NOW, status: 'queued', expiresAt: null, ...values };
+}
+const encoder = new TextEncoder();
+const AAD = encoder.encode('webrtc-bun-chat-backup:1:PBKDF2-SHA256:600000:AES-256-GCM');
+async function envelopeFor(payload: unknown, password = PASSWORD) {
+  const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
+  const material = await crypto.subtle.importKey('raw', encoder.encode(password), 'PBKDF2', false, ['deriveKey']);
+  const key = await crypto.subtle.deriveKey({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: 600000 }, material, { name: 'AES-GCM', length: 256 }, false, ['encrypt']);
+  const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: AAD, tagLength: 128 }, key, encoder.encode(JSON.stringify(payload)));
+  return new Blob([JSON.stringify({ format: 'webrtc-bun-chat-backup', version: 1, kdf: 'PBKDF2-SHA256', iterations: 600000, cipher: 'AES-256-GCM', salt: Buffer.from(salt).toString('base64'), iv: Buffer.from(iv).toString('base64'), ciphertext: Buffer.from(encrypted).toString('base64') })]);
+}
+
+describe('device-only chat storage', () => {
+  test('burning one conversation removes only that conversation', async () => {
+    const { store } = fixture();
+    const burned = [message(), message({ direction: 'incoming', status: 'delivered' })];
+    const kept = message({ conversationId: 's'.repeat(43) });
+    for (const item of [...burned, kept]) await store.put(item);
+    await store.removeConversation(ROOM);
+    expect(await store.list()).toEqual([kept]);
+    await store.removeConversation(ROOM);
+    await expect(store.removeConversation('bad-room')).rejects.toThrow('Invalid conversation');
+    expect(await store.list()).toEqual([kept]);
+  });
+  test('late delivery updates cannot resurrect cleared or expired history', async () => {
+    const f = fixture(), item = message();
+    expect(await f.store.setStatus(item.conversationId, item.id, 'sent')).toBe(false);
+    await f.store.put(item);
+    expect(await f.store.setStatus(item.conversationId, item.id, 'delivered')).toBe(true);
+    expect(await f.store.setStatus(item.conversationId, item.id, 'sent')).toBe(true);
+    expect((await f.store.list())[0]!.status).toBe('delivered');
+    await f.store.clear();
+    expect(await f.store.setStatus(item.conversationId, item.id, 'delivered')).toBe(false);
+    expect(await f.store.list()).toEqual([]);
+    const expiring = message({ expiresAt: NOW + 1000 });
+    await f.store.put(expiring); f.advance(1001);
+    expect(await f.store.setStatus(expiring.conversationId, expiring.id, 'sent')).toBe(false);
+    expect(await f.store.list()).toEqual([]);
+    await expect(f.store.setStatus('bad-room', item.id, 'sent')).rejects.toThrow();
+  });
+  test('put/list persist, deduplicate, update status and preserve immutable expiry', async () => {
+    const { store } = fixture();
+    const item = message({ expiresAt: NOW + 3600000 });
+    await store.put(item);
+    await store.put({ ...item, status: 'delivered' });
+    await store.put({ ...item, status: 'sent' });
+    expect(await store.list()).toEqual([{ ...item, status: 'delivered' }]);
+    await expect(store.put({ ...item, expiresAt: NOW + 7200000 })).rejects.toThrow('conflicting');
+    await expect(store.put({ ...item, text: 'changed' })).rejects.toThrow('conflicting');
+    await store.put({ ...item, conversationId: 's'.repeat(43) });
+    expect((await store.list()).length).toBe(2);
+    await store.clear();
+    expect(await store.list()).toEqual([]);
+  });
+
+  test('invalid fields, oversized UTF-8 text, invalid expiry and secrets are rejected before persistence', async () => {
+    const { store } = fixture();
+    for (const item of [message({ text: '🧪'.repeat(1025) }), message({ id: 'not-a-uuid' }), message({ conversationId: 'bad' }), message({ createdAt: NaN }), message({ expiresAt: NOW }), message({ expiresAt: NOW + 31 * 86400000 }), { ...message(), token: 'secret-invitation' }, { ...message(), adminToken: 'secret-admin' }, { ...message(), turnSecret: 'secret-turn' }]) {
+      await expect(store.put(item)).rejects.toThrow();
+    }
+    expect(await store.list()).toEqual([]);
+  });
+
+  test('expiry removes stored data and expired messages cannot be put again', async () => {
+    const f = fixture(), item = message({ expiresAt: NOW + 1000 });
+    await f.store.put(item); f.advance(1001);
+    expect(await f.store.list()).toEqual([]);
+    await expect(f.store.put(item)).rejects.toThrow('expired');
+    const database = await new Promise<any>((resolve, reject) => { const r = f.indexedDB.open('webrtc-bun-chat-v1', 1); r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error); });
+    const count = await new Promise<number>((resolve, reject) => { const r = database.transaction('messages').objectStore('messages').count(); r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error); });
+    expect(count).toBe(0); database.close();
+  });
+
+  test('capacity overflow and conflicting import are atomic', async () => {
+    const { store } = fixture();
+    const items = Array.from({ length: 2000 }, (_, index) => message({ text: `Message ${index}` }));
+    expect(await store.importBackup(await envelopeFor({ version: 1, messages: items }), PASSWORD)).toBe(2000);
+    await expect(store.put(message())).rejects.toThrow('2,000');
+    const incoming = [message(), { ...items[0], text: 'conflicting text' }];
+    await expect(store.importBackup(await envelopeFor({ version: 1, messages: incoming }), PASSWORD)).rejects.toThrow('conflicting');
+    expect(await store.list()).toHaveLength(2000);
+    expect((await store.list()).find(item => item.id === items[0]!.id)?.text).toBe('Message 0');
+    await expect(store.importBackup(await envelopeFor({ version: 1, messages: [message()] }), PASSWORD)).rejects.toThrow('2,000');
+    expect(await store.list()).toHaveLength(2000);
+  }, 15000);
+});
+
+describe('encrypted portable backups', () => {
+  test('restored outgoing history cannot replay and an old backup cannot alter live delivery state', async () => {
+    const from = fixture().store, to = fixture().store;
+    const queued = message(), sent = message({ status: 'sent' }), delivered = message({ status: 'delivered' });
+    for (const item of [queued, sent, delivered]) await from.put(item);
+    const backup = await from.exportBackup(PASSWORD);
+    await to.put({ ...queued, status: 'delivered' });
+    expect(await to.importBackup(backup, PASSWORD)).toBe(2);
+    const restored = await to.list();
+    expect(restored.find(item => item.id === queued.id)?.status).toBe('delivered');
+    expect(restored.find(item => item.id === sent.id)?.status).toBe('uncertain');
+    expect(restored.find(item => item.id === delivered.id)?.status).toBe('delivered');
+    const fresh = fixture().store;
+    await fresh.importBackup(backup, PASSWORD);
+    expect((await fresh.list()).find(item => item.id === queued.id)?.status).toBe('uncertain');
+    expect(await fresh.setStatus(queued.conversationId, queued.id, 'sent')).toBe(false);
+    expect((await fresh.list()).find(item => item.id === queued.id)?.status).toBe('uncertain');
+  }, 15000);
+  test('real AES-GCM round-trip into a different device database and deduplication', async () => {
+    const from = fixture().store, to = fixture().store;
+    const items = [message({ status: 'delivered' }), message({ direction: 'incoming', expiresAt: NOW + 86400000 })];
+    for (const item of items) await from.put(item);
+    const backup = await from.exportBackup(PASSWORD), raw = await backup.text(), envelope = JSON.parse(raw);
+    expect(raw).not.toContain('Private hello');
+    expect(raw).not.toContain(items[0]!.id);
+    expect(Object.keys(envelope).sort()).toEqual(['cipher', 'ciphertext', 'format', 'iterations', 'iv', 'kdf', 'salt', 'version']);
+    expect(envelope.iterations).toBe(600000);
+    expect(Buffer.from(envelope.iv, 'base64')).toHaveLength(12);
+    expect(Buffer.from(envelope.salt, 'base64')).toHaveLength(16);
+    expect(await to.importBackup(backup, PASSWORD)).toBe(2);
+    expect(await to.importBackup(backup, PASSWORD)).toBe(0);
+    expect((await to.list()).map(item => item.id).sort()).toEqual(items.map(item => item.id).sort());
+    const second = JSON.parse(await (await from.exportBackup(PASSWORD)).text());
+    expect(second.salt).not.toBe(envelope.salt);
+    expect(second.iv).not.toBe(envelope.iv);
+    expect(second.ciphertext).not.toBe(envelope.ciphertext);
+  }, 15000);
+
+  test('wrong password and tampering leave existing device data untouched', async () => {
+    const { store } = fixture(); const item = message(); await store.put(item);
+    const backup = await store.exportBackup(PASSWORD);
+    await expect(store.importBackup(backup, 'incorrect password')).rejects.toThrow('Incorrect backup password or corrupted');
+    const envelope = JSON.parse(await backup.text());
+    const ciphertext = Buffer.from(envelope.ciphertext, 'base64'); ciphertext[0] = ciphertext[0]! ^ 1;
+    envelope.ciphertext = ciphertext.toString('base64');
+    await expect(store.importBackup(new Blob([JSON.stringify(envelope)]), PASSWORD)).rejects.toThrow('Incorrect backup password or corrupted');
+    expect(await store.list()).toEqual([item]);
+  }, 15000);
+
+  test('expired backup records never resurrect and exports omit expired messages', async () => {
+    const f = fixture(), to = fixture();
+    await f.store.put(message({ expiresAt: NOW + 1000 }));
+    const backup = await f.store.exportBackup(PASSWORD);
+    f.advance(1001); to.advance(1001);
+    expect(await to.store.importBackup(backup, PASSWORD)).toBe(0);
+    expect(await to.store.list()).toEqual([]);
+    const empty = await f.store.exportBackup(PASSWORD);
+    expect(await fixture().store.importBackup(empty, PASSWORD)).toBe(0);
+  }, 15000);
+
+  test('strict envelope limits reject malicious iterations, extra fields and malformed encodings', async () => {
+    const { store } = fixture();
+    await expect(store.exportBackup('too short')).rejects.toThrow('12 characters');
+    await expect(store.exportBackup('x'.repeat(1025))).rejects.toThrow('1,024');
+    await expect(store.importBackup(new Blob(['bad json']), PASSWORD)).rejects.toThrow('Invalid');
+    await expect(store.importBackup(new Blob([new Uint8Array(10 * 1024 * 1024 + 1)]), PASSWORD)).rejects.toThrow('10 MiB');
+    const envelope = JSON.parse(await (await store.exportBackup(PASSWORD)).text());
+    for (const changed of [{ ...envelope, version: 2 }, { ...envelope, iterations: 1 }, { ...envelope, iterations: 1000000000 }, { ...envelope, token: 'secret' }, { ...envelope, iv: 'bad!' }, { ...envelope, salt: 'YQ==' }]) {
+      await expect(store.importBackup(new Blob([JSON.stringify(changed)]), PASSWORD)).rejects.toThrow();
+    }
+  }, 15000);
+
+  test('authenticated malformed payload is rejected wholly before any import transaction', async () => {
+    const { store } = fixture(); const original = message(); await store.put(original);
+    for (const payload of [{ version: 1, messages: [message(), { ...message(), token: 'never-store' }] }, { version: 1, messages: [], adminToken: 'never-store' }, { version: 1, messages: Array.from({ length: 2001 }, () => message()) }]) {
+      await expect(store.importBackup(await envelopeFor(payload), PASSWORD)).rejects.toThrow();
+      expect(await store.list()).toEqual([original]);
+    }
+  }, 15000);
+});
+
+describe('incoming mailbox messages', () => {
+  const payload = (values: Record<string, unknown> = {}) => ({ v: 1, type: 'message', id: crypto.randomUUID(), text: 'sealed hello', createdAt: NOW, expiresAt: null, ...values });
+  test('are stored once by id; a reused id with other content is a deterministic conflict', async () => {
+    const { store } = fixture();
+    const first = payload();
+    expect(await store.receive(ROOM, first)).toBe('stored');
+    expect(await store.receive(ROOM, first)).toBe('duplicate');
+    expect((await store.list()).length).toBe(1);
+    await expect(store.receive(ROOM, { ...first, text: 'different' })).rejects.toMatchObject({ code: 'conflict' });
+  });
+  test('payloads that pass a shape check but fail storage validation are rejected deterministically', async () => {
+    const { store } = fixture();
+    for (const bad of [
+      payload({ id: 'not-a-uuid' }), payload({ text: '' }), payload({ text: 'x'.repeat(4097) }), payload({ createdAt: -1 }),
+      payload({ expiresAt: NOW }), payload({ expiresAt: NOW + 31 * 86400000 }), payload({ createdAt: 1.5 }),
+    ]) await expect(store.receive(ROOM, bad)).rejects.toMatchObject({ code: 'invalid' });
+    expect(await store.receive(ROOM, payload({ createdAt: NOW - 7200000, expiresAt: NOW - 3600000 }))).toBe('expired');
+  });
+  test('one contact flooding fills only its own conversation; other contacts are still stored', async () => {
+    const { store } = fixture();
+    const other = 's'.repeat(43);
+    for (let index = 0; index < 500; index++) expect(await store.receive(ROOM, payload())).toBe('stored');
+    await expect(store.receive(ROOM, payload())).rejects.toMatchObject({ code: 'conversation-full' });
+    expect(store.inboundDisposition({ code: 'conversation-full' }, 1)).toEqual({ ack: true, notice: 'conversation-full' });
+    expect(await store.receive(other, payload())).toBe('stored');
+  });
+  test('a sender whose clock runs ahead loses nothing: the message is dated on arrival and keeps its lifetime', async () => {
+    const { store } = fixture();
+    const ahead = NOW + 3600000, id = crypto.randomUUID(); // The fixture clock reads NOW.
+    expect(await store.receive(ROOM, payload({ id, createdAt: ahead, expiresAt: ahead + 600000 }))).toBe('stored');
+    const stored = (await store.list()).find(message => message.id === id)!;
+    expect(stored.createdAt).toBe(NOW);
+    expect(stored.expiresAt! - stored.createdAt).toBe(600000);
+  });
+  test('a flood from one contact fills the device cap with a deterministic "full" rejection instead of a stall', async () => {
+    const { store } = fixture();
+    for (let index = 0; index < 2000; index++) expect(await store.receive(`${'c'.repeat(42)}${'abcd'[index % 4]}`, payload())).toBe('stored');
+    await expect(store.receive(ROOM, payload())).rejects.toMatchObject({ code: 'full' });
+    expect(store.inboundDisposition({ code: 'full' }, 1)).toEqual({ ack: true, notice: 'storage-full' });
+  }, 30000); // 2,000 IndexedDB transactions: slower CI runners exceed the default 5 s.
+  test('fails closed: only known permanent outcomes are acknowledged at once; everything else is retried up to three times', () => {
+    const { store } = fixture();
+    expect(store.inboundDisposition(null, 1)).toEqual({ ack: true, notice: null });
+    expect(store.inboundDisposition({ code: 'replay' }, 1)).toEqual({ ack: true, notice: null });
+    for (const code of ['invalid', 'conflict', 'mismatch']) expect(store.inboundDisposition({ code }, 1)).toEqual({ ack: true, notice: code });
+    for (const code of ['auth', 'malformed', 'skip-limit', 'unknown-session', 'unknown-spk', 'claim-limit']) expect(store.inboundDisposition({ code }, 1)).toEqual({ ack: true, notice: 'undecryptable' });
+    for (const error of [{ code: 'storage' }, new Error('IndexedDB hiccup'), { code: 'something-new' }, 'thrown string']) {
+      expect(store.inboundDisposition(error, 1)).toEqual({ ack: false, notice: 'retrying' });
+      expect(store.inboundDisposition(error, 2)).toEqual({ ack: false, notice: 'retrying' });
+      expect(store.inboundDisposition(error, 3)).toEqual({ ack: true, notice: 'gave-up' });
+    }
+  });
+});
+
+describe('control payloads and key rotation', () => {
+  const id = () => crypto.randomUUID();
+  test('rotate and policy payloads have an exact shape; anything else is invalid', () => {
+    const { store } = fixture();
+    expect(store.checkPayload({ v: 1, type: 'rotate', id: id(), reason: 'manual' })).toBe('rotate');
+    expect(store.checkPayload({ v: 1, type: 'rotate', id: id(), reason: 'scheduled' })).toBe('rotate');
+    expect(store.checkPayload({ v: 1, type: 'policy', id: id(), rotateEveryMs: 86400000 })).toBe('policy');
+    expect(store.checkPayload({ v: 1, type: 'policy', id: id(), rotateEveryMs: 0 })).toBe('policy');
+    expect(store.checkPayload({ v: 1, type: 'burn', id: id() })).toBe('burn');
+    for (const bad of [
+      { v: 1, type: 'rotate', id: id(), reason: 'because' }, { v: 1, type: 'rotate', id: id() }, { v: 1, type: 'rotate', id: id(), reason: 'manual', extra: 1 },
+      { v: 1, type: 'policy', id: id(), rotateEveryMs: -1 }, { v: 1, type: 'policy', id: id(), rotateEveryMs: 1.5 }, { v: 1, type: 'policy', id: id(), rotateEveryMs: '86400000' },
+      { v: 2, type: 'rotate', id: id(), reason: 'manual' }, { v: 1, type: 'rotate', id: 'nope', reason: 'manual' }, { v: 1, type: 'unknown', id: id() }, null, [],
+    ]) expect(() => store.checkPayload(bad)).toThrow(expect.objectContaining({ code: 'invalid' }));
+  });
+  test('system lines never come from outside: put and backup import reject them, and backups leave them out', async () => {
+    const { store } = fixture();
+    await expect(store.put({ ...message(), direction: 'system', status: 'delivered' })).rejects.toThrow();
+    await store.put(message({ text: 'kept' }));
+    await store.note(ROOM, id(), '🔄 Secure session reset by you');
+    const backup = await store.exportBackup('correct horse battery staple');
+    const restored = fixture();
+    expect(await restored.store.importBackup(backup, 'correct horse battery staple')).toBe(1);
+    expect((await restored.store.list()).map(record => record.direction)).toEqual(['outgoing']);
+  });
+  test('a contact cannot flood system lines: they coalesce within a minute and count toward the caps', async () => {
+    const { store, advance } = fixture();
+    for (let index = 0; index < 50; index++) await store.note(ROOM, id(), `🔄 Secure session reset by mallory ${index}`);
+    let rows = (await store.list()).filter(record => record.direction === 'system');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.text).toBe('🔄 Secure session reset by mallory 49');
+    advance(61000);
+    await store.note(ROOM, id(), '🔄 later');
+    rows = (await store.list()).filter(record => record.direction === 'system');
+    expect(rows).toHaveLength(2);
+    // System lines share the 500-per-conversation allowance with the contact's messages.
+    const full = fixture();
+    for (let index = 0; index < 499; index++) expect(await full.store.receive(ROOM, { v: 1, type: 'message', id: id(), text: 'x', createdAt: NOW, expiresAt: null })).toBe('stored');
+    expect(await full.store.note(ROOM, id(), '🔄 reset')).toBe(true);
+    full.advance(61000);
+    await expect(full.store.note(ROOM, id(), '🔄 reset again')).rejects.toMatchObject({ code: 'conversation-full' });
+  });
+  test('system lines are stored once per id, never as messages to send, and are removed with the conversation', async () => {
+    const { store } = fixture(), line = id();
+    expect(await store.note(ROOM, line, '🔄 Secure session reset by you')).toBe(true);
+    expect(await store.note(ROOM, line, '🔄 Secure session reset by you')).toBe(false);
+    const records = await store.list();
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ direction: 'system', status: 'delivered', expiresAt: null });
+    await store.removeConversation(ROOM);
+    expect(await store.list()).toHaveLength(0);
+  });
+});
+
+describe('actions, polls and votes', () => {
+  const store = () => fixture().store as Store & { vote(conversationId: string, pollId: string, voter: string, option: number | null): Promise<boolean> };
+  const poll = (values: Record<string, unknown> = {}) => ({ v: 1, type: 'message', id: crypto.randomUUID(), text: '📊 Lunch?\n1. Pizza\n2. Sushi', createdAt: NOW, expiresAt: null, kind: 'poll', poll: { question: 'Lunch?', options: ['Pizza', 'Sushi'] }, ...values });
+  test('payload shapes: plain, action and poll messages and votes are exact; old shapes stay valid', () => {
+    const { store: s } = fixture(), id = crypto.randomUUID();
+    expect(s.checkPayload({ v: 1, type: 'message', id, text: 'hi', createdAt: NOW, expiresAt: null })).toBe('message');
+    expect(s.checkPayload({ v: 1, type: 'message', id, text: 'waves', createdAt: NOW, expiresAt: null, kind: 'action' })).toBe('message');
+    expect(s.checkPayload(poll())).toBe('message');
+    expect(s.checkPayload({ v: 1, type: 'vote', id, poll: crypto.randomUUID(), option: 1 })).toBe('vote');
+    expect(s.checkPayload({ v: 1, type: 'vote', id, poll: crypto.randomUUID(), option: null })).toBe('vote');
+    for (const bad of [
+      { v: 1, type: 'message', id, text: 'x', createdAt: NOW, expiresAt: null, kind: 'poll' }, // poll without poll data
+      { v: 1, type: 'message', id, text: 'x', createdAt: NOW, expiresAt: null, kind: 'action', extra: 1 },
+      { v: 1, type: 'message', id, text: 'x', createdAt: NOW, expiresAt: null, poll: {} }, // poll data without kind
+      { v: 1, type: 'vote', id, poll: 'nope', option: 1 },
+      { v: 1, type: 'vote', id, poll: crypto.randomUUID(), option: 10 },
+      { v: 1, type: 'vote', id, poll: crypto.randomUUID(), option: 1.5 },
+    ]) expect(() => s.checkPayload(bad)).toThrow();
+  });
+  test('polls are capped: 2–10 options of at most 200 characters; actions carry no poll', async () => {
+    const s = store();
+    expect(await s.receive(ROOM, poll())).toBe('stored');
+    for (const options of [['only'], Array.from({ length: 11 }, (_, index) => `o${index}`), ['a', 'x'.repeat(201)], ['a', '  '], ['a', 2]]) {
+      await expect(s.receive(ROOM, poll({ poll: { question: 'Q', options } }))).rejects.toMatchObject({ code: 'invalid' });
+    }
+    await expect(s.receive(ROOM, poll({ poll: { question: 'x'.repeat(201), options: ['a', 'b'] } }))).rejects.toMatchObject({ code: 'invalid' });
+    await expect(s.put({ id: crypto.randomUUID(), conversationId: ROOM, direction: 'outgoing', text: 'x', createdAt: NOW, status: 'queued', expiresAt: null, kind: 'action', poll: { question: 'Q', options: ['a', 'b'] } })).rejects.toThrow();
+    await expect(s.put({ id: crypto.randomUUID(), conversationId: ROOM, direction: 'outgoing', text: 'x', createdAt: NOW, status: 'queued', expiresAt: null, kind: 'sticker' })).rejects.toThrow();
+  });
+  test('votes: one per voter, changeable, tallied locally; unknown polls and options are ignored', async () => {
+    const s = store(), incoming = poll();
+    await s.receive(ROOM, incoming);
+    expect(await s.vote(ROOM, incoming.id, 'me', 1)).toBe(true);
+    expect(await s.vote(ROOM, incoming.id, 'peer', 0)).toBe(true);
+    expect(await s.vote(ROOM, incoming.id, 'me', 0)).toBe(true); // Changed vote.
+    expect(await s.vote(ROOM, incoming.id, 'peer', 5)).toBe(false);
+    expect(await s.vote(ROOM, crypto.randomUUID(), 'peer', 0)).toBe(false);
+    await expect(s.vote(ROOM, incoming.id, 'mallory', 0)).rejects.toMatchObject({ code: 'invalid' });
+    const [stored] = await s.list() as any[];
+    expect(stored.votes).toEqual({ me: 0, peer: 0 });
+    // A redelivered poll is a duplicate (votes never conflict) and keeps its tallies.
+    expect(await s.receive(ROOM, incoming)).toBe('duplicate');
+    expect(((await s.list()) as any[])[0].votes).toEqual({ me: 0, peer: 0 });
+    // Votes on a plain message do nothing.
+    const plain = { v: 1, type: 'message', id: crypto.randomUUID(), text: 'hi', createdAt: NOW + 1, expiresAt: null };
+    await s.receive(ROOM, plain);
+    expect(await s.vote(ROOM, plain.id, 'peer', 0)).toBe(false);
+  });
+  test('rich messages survive an encrypted backup round trip', async () => {
+    const s = store(), incoming = poll();
+    await s.receive(ROOM, incoming);
+    await s.vote(ROOM, incoming.id, 'me', 1);
+    await s.put({ id: crypto.randomUUID(), conversationId: ROOM, direction: 'outgoing', text: 'waves', createdAt: NOW + 5, status: 'delivered', expiresAt: null, kind: 'action' });
+    const backup = await s.exportBackup(PASSWORD);
+    const other = store();
+    expect(await other.importBackup(backup, PASSWORD)).toBe(2);
+    const restored = await other.list() as any[];
+    expect(restored.map(record => record.kind)).toEqual(['poll', 'action']);
+    expect(restored[0].votes).toEqual({ me: 1 });
+  });
+});

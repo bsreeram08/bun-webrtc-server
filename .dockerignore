@@ -1,0 +1,16 @@
+**
+!packages/
+!packages/signaling/
+!packages/signaling/**
+!packages/stun-server/
+!packages/stun-server/native/
+!packages/stun-server/native/**
+!Dockerfile
+**/.env*
+**/*.pem
+**/*.key
+!scripts/
+!scripts/create-room.ts
+!scripts/create-invite.ts
+**/node_modules
+**/data
