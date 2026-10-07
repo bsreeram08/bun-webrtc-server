@@ -226,7 +226,7 @@ describe('incoming mailbox messages', () => {
     for (let index = 0; index < 2000; index++) expect(await store.receive(`${'c'.repeat(42)}${'abcd'[index % 4]}`, payload())).toBe('stored');
     await expect(store.receive(ROOM, payload())).rejects.toMatchObject({ code: 'full' });
     expect(store.inboundDisposition({ code: 'full' }, 1)).toEqual({ ack: true, notice: 'storage-full' });
-  });
+  }, 30000); // 2,000 IndexedDB transactions: slower CI runners exceed the default 5 s.
   test('fails closed: only known permanent outcomes are acknowledged at once; everything else is retried up to three times', () => {
     const { store } = fixture();
     expect(store.inboundDisposition(null, 1)).toEqual({ ack: true, notice: null });
