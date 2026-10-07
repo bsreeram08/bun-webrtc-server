@@ -1,6 +1,6 @@
 # Slack-like encrypted workspace — architecture plan
 
-Status: proposal (2026-10-06). Grounded in `feat/key-rotation` (production), `feat/rust-core`, `feat/native-server`, `feat/flutter-app`.
+Status: proposal (2026-10-06); decisions recorded 2026-10-07; M0 built on `feat/wasm-core`. Grounded in `feat/key-rotation` (production), `feat/rust-core`, `feat/native-server`, `feat/flutter-app`.
 
 ## Decisions already made
 - End-to-end encryption everywhere. Bots, plugins and the MCP server are real members with their own keys and only see channels they are invited to.
@@ -8,6 +8,21 @@ Status: proposal (2026-10-06). Grounded in `feat/key-rotation` (production), `fe
 - Linked devices (each device is an MLS leaf).
 - Slash commands (built-ins now on `feat/slash-commands`, bot commands later).
 - Later: bot accounts, SDK, events API, MCP server, plugins. Native push already exists on `feat/native-server`.
+
+## Decisions (2026-10-07)
+The user accepted the recommended answers to the open questions (§9):
+- **DMs keep contact requests** (no workspace-wide DMs without acceptance).
+- **New members see history from when they join.** An encrypted history share (§5, M14) is optional per channel, later.
+- **`/burn` in groups:** admins delete for everyone; anyone deletes their own messages.
+- **Mention-only notifications are filtered on the device.** No cleartext mention hint goes to the server.
+- **Group calls later** (huddles with an encrypted media relay).
+- **One workspace per deployment.**
+- **The account identity key (AIK) lives on a single primary device.**
+- **Verification is kept across a signed primary succession** (soft notice, no re-verification).
+- **Device labels and platforms are encrypted** inside the DeviceList, not visible to the server.
+- **`/remind` is local only** (no server-timed delivery).
+- **Post-quantum later**, as a per-group ciphersuite upgrade.
+- **Legacy 1:1 Double Ratchet stays receive-only for 60 days** after both sides support MLS.
 
 ## 0. Code facts that shape the design
 | # | Fact | Consequence |
@@ -65,6 +80,17 @@ Status: proposal (2026-10-06). Grounded in `feat/key-rotation` (production), `fe
 - **Store:** async IndexedDB under a synchronous core via preload → run against an in-memory journal → apply all writes in one transaction; two-phase receive kept. **No CryptoKey objects in this store** (Safari lesson): every value AES-GCM-encrypted under a non-extractable AES key; private keys exist as bytes only inside WASM memory.
 - CSP: add `'wasm-unsafe-eval'` and `blob:` for images/media.
 - Run the core in a worker; one writer per account across tabs and the service worker via Web Locks.
+
+### M0 as built (`feat/wasm-core`)
+- **Crates:** `chatcore` has features `native` (default: SQLite, the apps and the interop CLI) and `wasm` (no SQLite; JS clock and randomness). `crates/chatcore-wasm` is the wasm-bindgen cdylib. `chatcore-ds` is not built yet (M3).
+- **One command protocol:** `chatcore::commands` (JSON command in, `{ok}`/`{error,code}` out) is shared by the interop CLI, the WASM build, the node interop party and the browser worker, so all of them run the same dispatcher.
+- **Store:** `JournaledStore` — the whole key database is preloaded into memory (it is small: identity, prekeys, sessions, pins, claims); every write applies in memory and is journaled; `ChatCore.call` returns the writes; the worker seals each value (AES-256-GCM, non-extractable AES key in `webrtc-bun-core-key-v1`, AAD `core1|<userId>|<row>`) and applies them in ONE IndexedDB transaction before answering. A failed persist drops the in-memory core so the next call reloads from disk. A marker row makes open fail closed (rows without a marker, or any row that won't authenticate, refuse the store; never a fresh identity).
+- **Build output is committed** (`packages/signaling/public/core/`, content-hashed + `manifest.json`): the server has no Rust toolchain and deploys by `git pull`. Builds are reproducible (path remapping, pinned rustc 1.93.1 and wasm-bindgen 0.2.129, no wasm-opt); CI's `core` job rebuilds with `bun run build:wasm --check` and fails if the committed bytes differ, then runs the interop matrix. Size: 363 KB raw / 148 KB brotli wasm + 16 KB glue.
+- **Server:** `/core/manifest.json` (no-cache) and `/core/chatcore[_bg].<hash>.{js,wasm}` (immutable, exact MIME, nosniff); CSP `script-src 'self' 'wasm-unsafe-eval'`.
+- **Single writer:** `core.js` takes the `chatcore:<userId>` Web Lock if free (`ifAvailable`), otherwise follows over `BroadcastChannel` and queues to take over; only the leader runs `core-worker.js`.
+- **Opt-in:** `localStorage['core-backend'] = 'wasm'` (or `?core=wasm`) makes account.js use `Core.box` instead of `Signal.box`. Default stays signal.js.
+- **Migrating existing users (later, not in M0):** the WASM core can't read signal.js's store (different layout; AIK signing key is a non-extractable CryptoKey). Plan: when M1 registers devices, a browser on signal.js keeps its AIK in WebCrypto (signing via JS, as §2.2 already requires) and exports everything else — sessions, pins, prekeys, claims, wrapped X25519 bytes — into the core's store in one step behind a marker, then switches backend. Until then, turning the flag on for an existing account behaves like a new device (the active-device banner offers "Use this device instead").
+- **Tests:** interop matrix now covers every direction between signal.js, native and WASM (878 checks; the WASM party is rebuilt from its persisted journal after every call); `tests/browser/webkit-wasm.mjs` (WebKit + Chromium: stable identity across reloads, every IndexedDB value sealed, decrypt after reload, two tabs → one leader + handover); `CORE=wasm node tests/browser/accounts.mjs` runs the whole accounts suite on the WASM core.
 
 ## 5. Slack features
 Payload types inside MLS: `message` (text, thread, mentions, attachments, markdown), `edit` (sender only), `delete` (sender or admin), `reaction`, `pin`, `topic`/`settings`, `receipt` (DMs only), `poll`/`vote`, `command`, `bot.manifest`, `history.share`, `burn`, `typing` (ephemeral). Validated in Rust so web and apps behave identically.

@@ -94,3 +94,7 @@ References: [coturn configuration](https://github.com/coturn/coturn/blob/master/
 ## Custom emoji
 
 Custom emoji images are stored in `DATA_DIR/emoji/` (content-addressed) and listed in `accounts.sqlite`; back the folder up with the database. Imports by URL are allowed from `emojis.slackmojis.com` and `slackmojis.com`; add more hosts with `EMOJI_IMPORT_HOSTS=host1,host2` (exact host names, https only). The server needs outbound HTTPS to those hosts for imports. nginx must allow request bodies of at least 768 KiB on `/api/emoji` (`client_max_body_size 1m;` covers it; the default 1 MiB already does).
+
+## WebAssembly messaging core
+
+`packages/signaling/public/core/` holds the browser build of `crates/chatcore` (content-hashed files plus `manifest.json`). It is committed, so a server deploy needs no Rust toolchain. After changing `crates/chatcore` or `crates/chatcore-wasm`, rebuild with `bun run build:wasm` (rustc 1.93.1, target `wasm32-unknown-unknown`; the script installs the pinned wasm-bindgen CLI) and commit the result. CI's `core` job runs `bun run build:wasm --check` and fails if the committed files are not exactly what the source builds. The web app only uses this core when a browser opts in (`localStorage['core-backend'] = 'wasm'`); signal.js remains the default.
